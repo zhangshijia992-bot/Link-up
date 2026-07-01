@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.log
+server.err
+server.log
+gemini_api_key.txt
+ui-premium-preview*.png
+.env
+.venv/
+node_modules/
