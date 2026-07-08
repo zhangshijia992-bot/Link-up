@@ -5,6 +5,7 @@ import csv
 import base64
 import hashlib
 import hmac
+import io
 import json
 import mimetypes
 import os
@@ -16,6 +17,18 @@ import urllib.request
 import smtplib
 import ssl
 from email.message import EmailMessage
+
+try:
+    from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
+    from azure.storage.blob import BlobServiceClient, ContentSettings
+except Exception as azure_import_error:
+    ResourceExistsError = None
+    ResourceNotFoundError = None
+    BlobServiceClient = None
+    ContentSettings = None
+    AZURE_IMPORT_ERROR = str(azure_import_error)
+else:
+    AZURE_IMPORT_ERROR = ""
 
 
 ROOT = Path(__file__).resolve().parent
@@ -53,6 +66,10 @@ MESSAGES_PATH = DATA_ROOT / "messages.csv"
 COMPETITION_ENTRIES_PATH = DATA_ROOT / "competition_entries.csv"
 UPLOAD_DIR = DATA_ROOT / "uploads"
 KEY_PATH = ROOT / "gemini_api_key.txt"
+AZURE_STORAGE_CONNECTION_STRING = os.environ.get("AZURE_STORAGE_CONNECTION_STRING", "").strip()
+AZURE_STORAGE_CONTAINER = os.environ.get("LINKUP_STORAGE_CONTAINER", "linkup-data").strip() or "linkup-data"
+USE_AZURE_BLOB_STORAGE = bool(AZURE_STORAGE_CONNECTION_STRING)
+BLOB_CONTAINER_CLIENT = None
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
 GEMINI_MODEL_FALLBACKS = [
     model.strip()
@@ -140,7 +157,87 @@ def ensure_csv_exists():
     ensure_file(CSV_PATH, HEADERS)
 
 
+def active_storage_provider():
+    if USE_AZURE_BLOB_STORAGE and BlobServiceClient:
+        return "azure_blob"
+    if USE_AZURE_BLOB_STORAGE and not BlobServiceClient:
+        return "azure_blob_missing_sdk"
+    return "local_file"
+
+
+def blob_name_for(path):
+    if isinstance(path, Path):
+        if path.parent == UPLOAD_DIR:
+            return f"uploads/{path.name}"
+        return path.name
+    return str(path).replace("\\", "/").lstrip("/")
+
+
+def get_blob_container():
+    global BLOB_CONTAINER_CLIENT
+    if not USE_AZURE_BLOB_STORAGE:
+        return None
+    if not BlobServiceClient:
+        raise RuntimeError(f"Azure Blob SDK is not installed: {AZURE_IMPORT_ERROR}")
+    if BLOB_CONTAINER_CLIENT is None:
+        service = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
+        container = service.get_container_client(AZURE_STORAGE_CONTAINER)
+        try:
+            container.create_container()
+        except Exception as error:
+            if ResourceExistsError is None or not isinstance(error, ResourceExistsError):
+                raise
+        BLOB_CONTAINER_CLIENT = container
+    return BLOB_CONTAINER_CLIENT
+
+
+def blob_exists(path):
+    if active_storage_provider() != "azure_blob":
+        return False
+    try:
+        return get_blob_container().get_blob_client(blob_name_for(path)).exists()
+    except Exception as error:
+        print("AZURE BLOB EXISTS ERROR:", repr(error), flush=True)
+        raise
+
+
+def read_blob_text(path):
+    blob = get_blob_container().get_blob_client(blob_name_for(path))
+    return blob.download_blob().readall().decode("utf-8-sig")
+
+
+def write_blob_text(path, text):
+    blob = get_blob_container().get_blob_client(blob_name_for(path))
+    blob.upload_blob(text.encode("utf-8"), overwrite=True)
+
+
+def read_blob_bytes(path):
+    blob = get_blob_container().get_blob_client(blob_name_for(path))
+    properties = blob.get_blob_properties()
+    return blob.download_blob().readall(), properties.content_settings.content_type
+
+
+def write_blob_bytes(path, raw, content_type="application/octet-stream"):
+    blob = get_blob_container().get_blob_client(blob_name_for(path))
+    settings = ContentSettings(content_type=content_type) if ContentSettings else None
+    blob.upload_blob(raw, overwrite=True, content_settings=settings)
+
+
 def ensure_file(path, headers):
+    if active_storage_provider() == "azure_blob":
+        if blob_exists(path):
+            return
+        for seed_path in [path, ROOT / path.name]:
+            if seed_path.exists():
+                write_blob_text(path, seed_path.read_text(encoding="utf-8-sig"))
+                print(f"Migrated existing {path.name} into Azure Blob Storage.", flush=True)
+                return
+        buffer = io.StringIO()
+        writer = csv.DictWriter(buffer, fieldnames=headers)
+        writer.writeheader()
+        write_blob_text(path, buffer.getvalue())
+        return
+
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         seed_path = ROOT / path.name
@@ -154,11 +251,23 @@ def ensure_file(path, headers):
 
 def read_csv(path, headers):
     ensure_file(path, headers)
+    if active_storage_provider() == "azure_blob":
+        text = read_blob_text(path)
+        return list(csv.DictReader(io.StringIO(text)))
     with path.open("r", newline="", encoding="utf-8-sig") as file:
         return list(csv.DictReader(file))
 
 
 def write_csv(path, headers, rows):
+    if active_storage_provider() == "azure_blob":
+        buffer = io.StringIO()
+        writer = csv.DictWriter(buffer, fieldnames=headers)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in headers})
+        write_blob_text(path, buffer.getvalue())
+        return
+
     with path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=headers)
         writer.writeheader()
@@ -737,6 +846,9 @@ def save_uploaded_file(data):
         file_name = f"{file_name or 'attachment'}{mimetypes.guess_extension(mime_type) or ''}"
     safe_name = safe_upload_name(file_name)
     target = UPLOAD_DIR / safe_name
+    if active_storage_provider() == "azure_blob":
+        write_blob_bytes(target, raw, mime_type or "application/octet-stream")
+        return file_name or safe_name, mime_type, f"/uploads/{safe_name}"
     target.write_bytes(raw)
     return file_name or safe_name, mime_type, f"/uploads/{safe_name}"
 
@@ -1358,6 +1470,23 @@ class Handler(SimpleHTTPRequestHandler):
         if path.startswith("/uploads/"):
             safe_name = Path(path.removeprefix("/uploads/")).name
             target = UPLOAD_DIR / safe_name
+            if active_storage_provider() == "azure_blob":
+                try:
+                    raw, mime_type = read_blob_bytes(target)
+                except Exception as error:
+                    if ResourceNotFoundError is not None and isinstance(error, ResourceNotFoundError):
+                        self.send_error(404, "Upload not found")
+                        return
+                    print("AZURE BLOB UPLOAD READ ERROR:", repr(error), flush=True)
+                    self.send_error(500, "Upload storage error")
+                    return
+                mime_type = mime_type or mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+                self.send_response(200)
+                self.send_header("Content-Type", mime_type)
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+                return
             if not target.exists() or not target.is_file():
                 self.send_error(404, "Upload not found")
                 return
@@ -1419,9 +1548,13 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/api/storage-health":
             return self.json_response(200, {
                 "cloud": IS_CLOUD_DEPLOYMENT,
+                "storage_provider": active_storage_provider(),
+                "azure_blob_requested": USE_AZURE_BLOB_STORAGE,
+                "azure_blob_sdk_loaded": bool(BlobServiceClient),
+                "azure_blob_container": AZURE_STORAGE_CONTAINER if USE_AZURE_BLOB_STORAGE else "",
                 "data_root": str(DATA_ROOT),
                 "data_root_exists": DATA_ROOT.exists(),
-                "accounts_file_exists": ACCOUNTS_PATH.exists(),
+                "accounts_file_exists": blob_exists(ACCOUNTS_PATH) if active_storage_provider() == "azure_blob" else ACCOUNTS_PATH.exists(),
                 "accounts_count": len(read_accounts()),
                 "users_count": len(read_users()),
                 "teams_count": len(read_csv(TEAMS_PATH, TEAM_HEADERS)),
@@ -1593,7 +1726,10 @@ class Handler(SimpleHTTPRequestHandler):
 if __name__ == "__main__":
     ensure_csv_exists()
     print(f"Link-Up AI Matching is running at http://{HOST}:{PORT}")
-    print(f"CSV storage file: {CSV_PATH}")
+    print(f"Runtime storage provider: {active_storage_provider()}")
+    print(f"Runtime data root: {DATA_ROOT}")
+    if USE_AZURE_BLOB_STORAGE:
+        print(f"Azure Blob container: {AZURE_STORAGE_CONTAINER}")
     print("Gemini API:", "enabled" if GEMINI_KEY else "not configured, using fallback AI")
     print("Gemini model order:", ", ".join(GEMINI_MODEL_FALLBACKS))
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()

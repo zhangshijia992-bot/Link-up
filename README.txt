@@ -182,7 +182,28 @@ GEMINI_MODEL = gemini-3.1-flash-lite
 
 In the cloud version, users should not paste API keys into the website. The Gemini key should be configured in Render environment variables. This protects the API key from being changed or exposed through the public website.
 
-CSV files are suitable for this alpha prototype. However, cloud services may reset local file changes after redeployment. For a real product, CSV storage should be upgraded to a cloud database.
+For cloud deployment, do **not** rely on CSV files inside the Azure App Service deployment folder. A redeploy can replace that folder and remove newly registered accounts. Link-Up now supports Azure Blob Storage as a persistent runtime data layer for accounts, profiles, teams, requests, messages, competition entries, and uploaded chat files.
+
+Set these Azure App Service environment variables before trusting the public site for real user testing:
+
+```text
+AZURE_STORAGE_CONNECTION_STRING = your Azure Storage connection string
+LINKUP_STORAGE_CONTAINER = linkup-data
+```
+
+After deployment, open:
+
+```text
+/api/storage-health
+```
+
+The response should show:
+
+```text
+storage_provider: azure_blob
+```
+
+If it still shows `local_file`, the app is using temporary file storage and user accounts may disappear after a future deployment.
 
 ## 5B. OTP Email Delivery
 
