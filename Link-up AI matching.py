@@ -19,17 +19,29 @@ from email.message import EmailMessage
 
 
 ROOT = Path(__file__).resolve().parent
-CSV_PATH = ROOT / "users.csv"
-PROFILE_PATH = ROOT / "profile.csv"
-TEAMS_PATH = ROOT / "teams.csv"
-REQUESTS_PATH = ROOT / "requests.csv"
-ACCOUNTS_PATH = ROOT / "accounts.csv"
-MESSAGES_PATH = ROOT / "messages.csv"
-COMPETITION_ENTRIES_PATH = ROOT / "competition_entries.csv"
-UPLOAD_DIR = ROOT / "assets" / "uploads"
-KEY_PATH = ROOT / "gemini_api_key.txt"
 PORT = int(os.environ.get("PORT") or os.environ.get("WEBSITES_PORT") or os.environ.get("LINKUP_PORT", "4173"))
 HOST = os.environ.get("HOST") or ("0.0.0.0" if (os.environ.get("PORT") or os.environ.get("WEBSITES_PORT")) else "127.0.0.1")
+IS_CLOUD_DEPLOYMENT = bool(
+    os.environ.get("PORT")
+    or os.environ.get("WEBSITES_PORT")
+    or os.environ.get("WEBSITE_SITE_NAME")
+    or os.environ.get("RENDER")
+    or os.environ.get("RAILWAY_ENVIRONMENT")
+)
+DATA_ROOT = Path(
+    os.environ.get("LINKUP_DATA_DIR")
+    or ((Path(os.environ.get("HOME")) / "linkup-data") if (IS_CLOUD_DEPLOYMENT and os.environ.get("HOME")) else ROOT)
+)
+DATA_ROOT.mkdir(parents=True, exist_ok=True)
+CSV_PATH = DATA_ROOT / "users.csv"
+PROFILE_PATH = DATA_ROOT / "profile.csv"
+TEAMS_PATH = DATA_ROOT / "teams.csv"
+REQUESTS_PATH = DATA_ROOT / "requests.csv"
+ACCOUNTS_PATH = DATA_ROOT / "accounts.csv"
+MESSAGES_PATH = DATA_ROOT / "messages.csv"
+COMPETITION_ENTRIES_PATH = DATA_ROOT / "competition_entries.csv"
+UPLOAD_DIR = DATA_ROOT / "uploads"
+KEY_PATH = ROOT / "gemini_api_key.txt"
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
 GEMINI_MODEL_FALLBACKS = [
     model.strip()
@@ -41,13 +53,6 @@ GEMINI_MODEL_FALLBACKS = [
 ]
 LAST_GEMINI_ERROR = ""
 LAST_GEMINI_MODEL_USED = GEMINI_MODEL
-IS_CLOUD_DEPLOYMENT = bool(
-    os.environ.get("PORT")
-    or os.environ.get("WEBSITES_PORT")
-    or os.environ.get("WEBSITE_SITE_NAME")
-    or os.environ.get("RENDER")
-    or os.environ.get("RAILWAY_ENVIRONMENT")
-)
 ALLOW_RUNTIME_KEY_SAVE = (
     os.environ.get("LINKUP_ALLOW_RUNTIME_KEY_SAVE", "").strip().lower() in {"1", "true", "yes"}
     or not IS_CLOUD_DEPLOYMENT
@@ -118,14 +123,16 @@ DEFAULT_PROFILE = {
 
 
 def ensure_csv_exists():
-    if not CSV_PATH.exists():
-        with CSV_PATH.open("w", newline="", encoding="utf-8") as file:
-            writer = csv.DictWriter(file, fieldnames=HEADERS)
-            writer.writeheader()
+    ensure_file(CSV_PATH, HEADERS)
 
 
 def ensure_file(path, headers):
     if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        seed_path = ROOT / path.name
+        if path.parent != ROOT and seed_path.exists():
+            path.write_text(seed_path.read_text(encoding="utf-8-sig"), encoding="utf-8")
+            return
         with path.open("w", newline="", encoding="utf-8") as file:
             writer = csv.DictWriter(file, fieldnames=headers)
             writer.writeheader()
@@ -666,7 +673,7 @@ def save_uploaded_file(data):
     safe_name = safe_upload_name(file_name)
     target = UPLOAD_DIR / safe_name
     target.write_bytes(raw)
-    return file_name or safe_name, mime_type, f"/assets/uploads/{safe_name}"
+    return file_name or safe_name, mime_type, f"/uploads/{safe_name}"
 
 
 def save_chat_message(data):
@@ -1283,6 +1290,20 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/":
             self.path = "/Link-up AI matching.html"
             return super().do_GET()
+        if path.startswith("/uploads/"):
+            safe_name = Path(path.removeprefix("/uploads/")).name
+            target = UPLOAD_DIR / safe_name
+            if not target.exists() or not target.is_file():
+                self.send_error(404, "Upload not found")
+                return
+            mime_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+            self.send_response(200)
+            self.send_header("Content-Type", mime_type)
+            self.send_header("Content-Length", str(target.stat().st_size))
+            self.end_headers()
+            with target.open("rb") as file:
+                self.wfile.write(file.read())
+            return
         if path == "/api/session":
             email = self.current_email()
             if not email:

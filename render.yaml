@@ -9,6 +9,8 @@ services:
         sync: false
       - key: GEMINI_MODEL
         value: gemini-3.1-flash-lite
+      - key: LINKUP_DATA_DIR
+        value: /home/linkup-data
       - key: LINKUP_SMTP_HOST
         value: smtp.gmail.com
       - key: LINKUP_SMTP_PORT
