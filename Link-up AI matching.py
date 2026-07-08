@@ -1,12 +1,21 @@
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from pathlib import Path
 import csv
+import base64
+import hashlib
+import hmac
 import json
+import mimetypes
 import os
+import re
+import secrets
 import time
 import urllib.error
 import urllib.request
+import smtplib
+import ssl
+from email.message import EmailMessage
 
 
 ROOT = Path(__file__).resolve().parent
@@ -14,8 +23,13 @@ CSV_PATH = ROOT / "users.csv"
 PROFILE_PATH = ROOT / "profile.csv"
 TEAMS_PATH = ROOT / "teams.csv"
 REQUESTS_PATH = ROOT / "requests.csv"
+ACCOUNTS_PATH = ROOT / "accounts.csv"
+MESSAGES_PATH = ROOT / "messages.csv"
+COMPETITION_ENTRIES_PATH = ROOT / "competition_entries.csv"
+UPLOAD_DIR = ROOT / "assets" / "uploads"
 KEY_PATH = ROOT / "gemini_api_key.txt"
-PORT = int(os.environ.get("LINKUP_PORT", "4173"))
+PORT = int(os.environ.get("PORT") or os.environ.get("WEBSITES_PORT") or os.environ.get("LINKUP_PORT", "4173"))
+HOST = os.environ.get("HOST") or ("0.0.0.0" if (os.environ.get("PORT") or os.environ.get("WEBSITES_PORT")) else "127.0.0.1")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
 GEMINI_MODEL_FALLBACKS = [
     model.strip()
@@ -27,6 +41,17 @@ GEMINI_MODEL_FALLBACKS = [
 ]
 LAST_GEMINI_ERROR = ""
 LAST_GEMINI_MODEL_USED = GEMINI_MODEL
+IS_CLOUD_DEPLOYMENT = bool(
+    os.environ.get("PORT")
+    or os.environ.get("WEBSITES_PORT")
+    or os.environ.get("WEBSITE_SITE_NAME")
+    or os.environ.get("RENDER")
+    or os.environ.get("RAILWAY_ENVIRONMENT")
+)
+ALLOW_RUNTIME_KEY_SAVE = (
+    os.environ.get("LINKUP_ALLOW_RUNTIME_KEY_SAVE", "").strip().lower() in {"1", "true", "yes"}
+    or not IS_CLOUD_DEPLOYMENT
+)
 
 
 def load_gemini_key():
@@ -39,15 +64,28 @@ def load_gemini_key():
 
 
 GEMINI_KEY = load_gemini_key()
+SMTP_HOST = os.environ.get("LINKUP_SMTP_HOST", "").strip()
+SMTP_PORT = int(os.environ.get("LINKUP_SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("LINKUP_SMTP_USER", "").strip()
+SMTP_PASSWORD = os.environ.get("LINKUP_SMTP_PASSWORD", "").strip()
+SMTP_FROM = os.environ.get("LINKUP_SMTP_FROM", SMTP_USER).strip()
 
 HEADERS = [
     "id", "name", "email", "role", "experience", "skills", "interests",
     "project_types", "preferred_roles", "availability", "working_style",
-    "communication_style", "goals", "portfolio", "badges"
+    "communication_style", "goals", "bio", "portfolio", "badges", "institution",
+    "organisation_type", "company", "location", "study_level", "major",
+    "graduation_year", "verification_status", "reliability_score"
 ]
 
-TEAM_HEADERS = ["id", "owner_email", "team_name", "idea", "project_type", "team_size", "open_roles", "status", "created_at"]
-REQUEST_HEADERS = ["id", "from_email", "target_name", "target_role", "project", "team_name", "status", "created_at"]
+TEAM_HEADERS = ["id", "owner_email", "team_name", "idea", "project_type", "team_size", "open_roles", "role_counts", "status", "created_at"]
+REQUEST_HEADERS = ["id", "from_email", "target_email", "target_name", "target_role", "request_type", "project", "team_name", "status", "created_at", "updated_at"]
+ACCOUNT_HEADERS = ["email", "password_hash", "salt", "created_at"]
+MESSAGE_HEADERS = ["id", "request_id", "sender_email", "sender_name", "message_type", "body", "file_name", "file_kind", "file_url", "created_at"]
+COMPETITION_ENTRY_HEADERS = ["id", "competition_title", "team_id", "team_name", "owner_email", "status", "created_at"]
+SESSIONS = {}
+PENDING_OTPS = {}
+CALL_SIGNALS = []
 
 DEFAULT_PROFILE = {
     "id": "me",
@@ -63,8 +101,18 @@ DEFAULT_PROFILE = {
     "working_style": "Fast responder;Collaborative member",
     "communication_style": "Frequent updates;Friendly tone",
     "goals": "Build MVPs;Join innovation challenges",
+    "bio": "Computer Science student interested in AI products, hackathons, and practical MVP building.",
     "portfolio": "Campus AI Assistant;Course Planner UI;Hackathon Landing Page",
     "badges": "First Collaboration;Active Contributor",
+    "institution": "Asia Pacific University of Technology & Innovation (APU)",
+    "organisation_type": "University Student",
+    "company": "",
+    "location": "Kuala Lumpur",
+    "study_level": "Bachelor Degree",
+    "major": "Computer Science",
+    "graduation_year": "2027",
+    "verification_status": "OTP verified",
+    "reliability_score": "86",
 }
 
 
@@ -96,9 +144,22 @@ def write_csv(path, headers, rows):
             writer.writerow({key: row.get(key, "") for key in headers})
 
 
-def read_profile():
+def profile_for_email(email=""):
+    normalized_email = (email or "").strip().lower()
+    users = read_users()
+    if normalized_email:
+        existing = next((user for user in users if user.get("email", "").lower() == normalized_email), None)
+        if existing:
+            return existing
     rows = read_csv(PROFILE_PATH, HEADERS)
-    return rows[0] if rows else DEFAULT_PROFILE.copy()
+    profile = rows[0] if rows else DEFAULT_PROFILE.copy()
+    if normalized_email:
+        profile = {**profile, "email": normalized_email, "id": normalized_email}
+    return profile
+
+
+def read_profile(email=""):
+    return profile_for_email(email)
 
 
 def write_profile(profile):
@@ -108,10 +169,280 @@ def write_profile(profile):
     return clean
 
 
+def password_digest(password, salt):
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 120000).hex()
+
+
+def read_accounts():
+    return read_csv(ACCOUNTS_PATH, ACCOUNT_HEADERS)
+def send_otp_email(to_email, otp, purpose="verification"):
+    print("SMTP CONFIG:", SMTP_HOST, SMTP_PORT, SMTP_USER, bool(SMTP_PASSWORD), flush=True)
+    print("SENDING OTP EMAIL TO:", to_email, flush=True)
+
+    if not SMTP_HOST or not SMTP_USER or not SMTP_PASSWORD:
+        if not IS_CLOUD_DEPLOYMENT:
+            print("SMTP not configured. Local prototype will show OTP on screen.", flush=True)
+            return ""
+        return "Email OTP is not configured. Please set LINKUP_SMTP_HOST, LINKUP_SMTP_USER, and LINKUP_SMTP_PASSWORD."
+
+    subject = "Your Link-Up 2.0 verification code"
+    body = f"""Hello,
+
+Your Link-Up 2.0 {purpose} code is:
+
+{otp}
+
+This OTP will expire in 10 minutes.
+
+If you did not request this code, please ignore this email.
+
+Link-Up 2.0
+AI Team Formation Workspace
+"""
+
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = SMTP_FROM or SMTP_USER
+    message["To"] = to_email
+    message.set_content(body)
+
+    try:
+        print("SMTP STEP 1: connecting...", flush=True)
+
+        if SMTP_PORT == 465:
+            context = ssl.create_default_context()
+            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=15, context=context) as server:
+                print("SMTP STEP 2: connected by SSL", flush=True)
+                server.login(SMTP_USER, SMTP_PASSWORD)
+                print("SMTP STEP 3: logged in", flush=True)
+                server.send_message(message)
+                print("SMTP STEP 4: message sent", flush=True)
+
+        else:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
+                print("SMTP STEP 2: connected", flush=True)
+                server.ehlo()
+                print("SMTP STEP 3: ehlo ok", flush=True)
+                server.starttls(context=ssl.create_default_context())
+                print("SMTP STEP 4: starttls ok", flush=True)
+                server.ehlo()
+                print("SMTP STEP 5: second ehlo ok", flush=True)
+                server.login(SMTP_USER, SMTP_PASSWORD)
+                print("SMTP STEP 6: logged in", flush=True)
+                server.send_message(message)
+                print("SMTP STEP 7: message sent", flush=True)
+
+        print("OTP EMAIL SENT SUCCESSFULLY TO:", to_email, flush=True)
+        return ""
+
+    except Exception as error:
+        print("OTP EMAIL ERROR:", repr(error), flush=True)
+        return f"Failed to send OTP email: {error}"
+
+def request_registration_otp(data):
+    email = data.get("email", "").strip().lower()
+
+    if not email or "@" not in email:
+        return None, "Please enter a valid email address before requesting OTP."
+
+    if any(account.get("email", "").lower() == email for account in read_accounts()):
+        return None, "This email is already registered. Please log in instead."
+
+    otp = f"{secrets.randbelow(900000) + 100000}"
+
+    PENDING_OTPS[email] = {
+        "otp": otp,
+        "expires_at": time.time() + 600,
+        "attempts": 0,
+        "purpose": "register",
+    }
+
+    email_error = send_otp_email(email, otp, "registration")
+    if email_error:
+        PENDING_OTPS.pop(email, None)
+        return None, email_error
+
+    payload = {
+        "email": email,
+        "expires_in_minutes": 10,
+        "delivery": "OTP has been sent to your email." if (SMTP_HOST and SMTP_USER and SMTP_PASSWORD) else "Prototype OTP is shown on screen.",
+    }
+    if not (SMTP_HOST and SMTP_USER and SMTP_PASSWORD):
+        payload["otp_demo"] = otp
+    return payload, ""
+
+
+def verify_registration_otp(email, otp):
+    email = (email or "").strip().lower()
+    record = PENDING_OTPS.get(email)
+    if not record:
+        return False, "Please request an OTP first."
+    if record.get("purpose") != "register":
+        return False, "Please request a registration OTP first."
+    if time.time() > record["expires_at"]:
+        PENDING_OTPS.pop(email, None)
+        return False, "OTP expired. Please request a new OTP."
+    record["attempts"] += 1
+    if record["attempts"] > 5:
+        PENDING_OTPS.pop(email, None)
+        return False, "Too many OTP attempts. Please request a new OTP."
+    if not hmac.compare_digest(str(record["otp"]), str(otp or "").strip()):
+        return False, "Incorrect OTP. Please check the six-digit code."
+    PENDING_OTPS.pop(email, None)
+    return True, ""
+
+
+def validate_login_credentials(email, password):
+    email = (email or "").strip().lower()
+    account = next((item for item in read_accounts() if item.get("email", "").lower() == email), None)
+    if not account:
+        return None, "Account not found. Please register first."
+    expected = password_digest(password or "", account.get("salt", ""))
+    if not hmac.compare_digest(expected, account.get("password_hash", "")):
+        return None, "Incorrect password."
+    return account, ""
+
+
+def request_login_otp(data):
+    email = data.get("email", "").strip().lower()
+
+    _, error = validate_login_credentials(email, data.get("password", ""))
+    if error:
+        return None, error
+
+    otp = f"{secrets.randbelow(900000) + 100000}"
+
+    PENDING_OTPS[email] = {
+        "otp": otp,
+        "expires_at": time.time() + 600,
+        "attempts": 0,
+        "purpose": "login",
+    }
+
+    email_error = send_otp_email(email, otp, "login verification")
+    if email_error:
+        PENDING_OTPS.pop(email, None)
+        return None, email_error
+
+    payload = {
+        "email": email,
+        "expires_in_minutes": 10,
+        "delivery": "OTP has been sent to your email." if (SMTP_HOST and SMTP_USER and SMTP_PASSWORD) else "Prototype OTP is shown on screen.",
+    }
+    if not (SMTP_HOST and SMTP_USER and SMTP_PASSWORD):
+        payload["otp_demo"] = otp
+    return payload, ""
+
+
+def verify_login_otp(data):
+    email = data.get("email", "").strip().lower()
+    _, error = validate_login_credentials(email, data.get("password", ""))
+    if error:
+        return None, error
+    record = PENDING_OTPS.get(email)
+    if not record or record.get("purpose") != "login":
+        return None, "Please request a login OTP first."
+    if time.time() > record["expires_at"]:
+        PENDING_OTPS.pop(email, None)
+        return None, "OTP expired. Please request a new OTP."
+    record["attempts"] += 1
+    if record["attempts"] > 5:
+        PENDING_OTPS.pop(email, None)
+        return None, "Too many OTP attempts. Please request a new OTP."
+    if not hmac.compare_digest(str(record["otp"]), str(data.get("otp", "")).strip()):
+        return None, "Incorrect OTP. Please check the six-digit code."
+    PENDING_OTPS.pop(email, None)
+    return {"email": email, "profile": read_profile(email), "token": create_session(email)}, ""
+
+
+def create_session(email):
+    token = secrets.token_urlsafe(32)
+    SESSIONS[token] = {"email": email.lower(), "created_at": time.time()}
+    return token
+
+
+def register_account(data):
+    email = data.get("email", "").strip().lower()
+    password = data.get("password", "")
+    if not email or "@" not in email:
+        return None, "Please enter a valid email address."
+    if len(password) < 6:
+        return None, "Password must be at least 6 characters."
+    accounts = read_accounts()
+    if any(account.get("email", "").lower() == email for account in accounts):
+        return None, "This email is already registered. Please log in instead."
+    otp_ok, otp_error = verify_registration_otp(email, data.get("otp", ""))
+    if not otp_ok:
+        return None, otp_error
+    salt = secrets.token_hex(16)
+    accounts.append({
+        "email": email,
+        "password_hash": password_digest(password, salt),
+        "salt": salt,
+        "created_at": time.strftime("%Y-%m-%d %H:%M"),
+    })
+    write_csv(ACCOUNTS_PATH, ACCOUNT_HEADERS, accounts)
+    profile = {
+        **DEFAULT_PROFILE,
+        "id": email,
+        "email": email,
+        "name": data.get("name", "").strip() or email.split("@")[0].replace(".", " ").title(),
+        "role": data.get("role", "Frontend Developer"),
+        "skills": data.get("skills", DEFAULT_PROFILE["skills"]),
+        "interests": data.get("interests", DEFAULT_PROFILE["interests"]),
+        "availability": data.get("availability", DEFAULT_PROFILE["availability"]),
+        "bio": data.get("bio", DEFAULT_PROFILE["bio"]),
+        "institution": data.get("institution", DEFAULT_PROFILE["institution"]),
+        "organisation_type": data.get("organisation_type", DEFAULT_PROFILE["organisation_type"]),
+        "company": data.get("company", ""),
+        "location": data.get("location", DEFAULT_PROFILE["location"]),
+        "major": data.get("major", DEFAULT_PROFILE["major"]),
+        "study_level": data.get("study_level", DEFAULT_PROFILE["study_level"]),
+        "graduation_year": data.get("graduation_year", DEFAULT_PROFILE["graduation_year"]),
+        "verification_status": "OTP verified",
+        "reliability_score": "82",
+    }
+    save_profile(profile)
+    return {"email": email, "profile": profile, "token": create_session(email)}, ""
+
+
+def login_account(data):
+    email = data.get("email", "").strip().lower()
+    password = data.get("password", "")
+    _, error = validate_login_credentials(email, password)
+    if error:
+        return None, error
+    return {"email": email, "profile": read_profile(email), "token": create_session(email)}, ""
+
+
 def read_users():
     ensure_csv_exists()
     with CSV_PATH.open("r", newline="", encoding="utf-8-sig") as file:
-        return list(csv.DictReader(file))
+        users = list(csv.DictReader(file))
+    institutions = [
+        "Asia Pacific University of Technology & Innovation (APU)",
+        "Universiti Malaya (UM)",
+        "Universiti Kebangsaan Malaysia (UKM)",
+        "Universiti Putra Malaysia (UPM)",
+        "Universiti Sains Malaysia (USM)",
+        "Universiti Teknologi Malaysia (UTM)",
+        "Taylor's University",
+        "Monash University Malaysia",
+        "Sunway University",
+        "Multimedia University (MMU)",
+    ]
+    for index, user in enumerate(users):
+        user.setdefault("institution", institutions[index % len(institutions)])
+        user.setdefault("organisation_type", "University Student")
+        user.setdefault("company", "")
+        user.setdefault("location", "Kuala Lumpur")
+        user.setdefault("study_level", "Bachelor Degree")
+        user.setdefault("major", "Computer Science")
+        user.setdefault("graduation_year", "2027")
+        user.setdefault("bio", f"{user.get('role', 'Collaborator')} interested in practical projects, team collaboration, and portfolio-building outcomes.")
+        user.setdefault("verification_status", "Profile verified")
+        user.setdefault("reliability_score", str(78 + (index % 18)))
+    return users
 
 
 def write_users(users):
@@ -206,10 +537,13 @@ def text_token_overlap(left, right):
 
 
 def save_profile(profile):
-    profile = write_profile(profile)
+    profile = {**DEFAULT_PROFILE, **profile}
+    profile["email"] = profile.get("email", "").strip().lower()
+    profile["id"] = profile.get("id") or profile["email"] or f"u{int(time.time())}"
+    if not IS_CLOUD_DEPLOYMENT:
+        write_profile(profile)
     users = read_users()
     clean = {key: profile.get(key, "") for key in HEADERS}
-    clean["id"] = profile.get("id") or f"u{int(time.time())}"
     found = None
     for index, user in enumerate(users):
         if user.get("email", "").lower() == clean.get("email", "").lower():
@@ -225,20 +559,164 @@ def save_profile(profile):
 
 def get_my_teams(owner_email=None):
     owner = (owner_email or read_profile().get("email", "")).lower()
-    return [team for team in read_csv(TEAMS_PATH, TEAM_HEADERS) if team.get("owner_email", "").lower() == owner]
+    return [normalize_team(team) for team in read_csv(TEAMS_PATH, TEAM_HEADERS) if team.get("owner_email", "").lower() == owner]
+
+
+def normalize_team(team):
+    clean = {key: team.get(key, "") for key in TEAM_HEADERS}
+    if not clean.get("role_counts"):
+        clean["role_counts"] = ";".join(f"{role}:1" for role in split_values(clean.get("open_roles")))
+    if not clean.get("team_size"):
+        clean["team_size"] = "5"
+    return clean
+
+
+def visible_requests_for(profile, requests=None):
+    email = profile.get("email", "").lower()
+    name = profile.get("name", "").strip().lower()
+    rows = requests if requests is not None else read_csv(REQUESTS_PATH, REQUEST_HEADERS)
+    visible = []
+    for item in rows:
+        from_email = item.get("from_email", "").lower()
+        target_email = item.get("target_email", "").lower()
+        target_name = item.get("target_name", "").strip().lower()
+        if from_email == email or target_email == email or (name and target_name == name):
+            visible.append(item)
+    return visible
+
+
+def accepted_request_for_actor(profile, request_id):
+    for item in visible_requests_for(profile):
+        if item.get("id") == request_id and item.get("status", "").lower() == "accepted":
+            return item
+    return None
+
+
+def messages_for_visible_requests(profile):
+    visible_ids = {item.get("id") for item in visible_requests_for(profile)}
+    return [
+        message
+        for message in read_csv(MESSAGES_PATH, MESSAGE_HEADERS)
+        if message.get("request_id") in visible_ids
+    ]
+
+
+def safe_upload_name(original_name):
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", original_name or "attachment")
+    stem, dot, suffix = name.rpartition(".")
+    if not stem:
+        stem = name
+        suffix = ""
+    suffix = suffix[:12]
+    return f"{stem[:42]}_{int(time.time() * 1000)}{dot}{suffix}" if suffix else f"{stem[:42]}_{int(time.time() * 1000)}"
+
+
+def save_uploaded_file(data):
+    file_data = data.get("file_data", "")
+    file_name = data.get("file_name", "")
+    if not file_data:
+        return "", "", ""
+    if "," in file_data:
+        meta, encoded = file_data.split(",", 1)
+        mime_match = re.search(r"data:([^;]+)", meta)
+        mime_type = mime_match.group(1) if mime_match else data.get("file_kind", "")
+    else:
+        encoded = file_data
+        mime_type = data.get("file_kind", "")
+    raw = base64.b64decode(encoded)
+    if len(raw) > 8 * 1024 * 1024:
+        raise ValueError("Attachment is larger than 8 MB.")
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    if not Path(file_name).suffix and mime_type:
+        file_name = f"{file_name or 'attachment'}{mimetypes.guess_extension(mime_type) or ''}"
+    safe_name = safe_upload_name(file_name)
+    target = UPLOAD_DIR / safe_name
+    target.write_bytes(raw)
+    return file_name or safe_name, mime_type, f"/assets/uploads/{safe_name}"
+
+
+def save_chat_message(data):
+    profile = read_profile(data.get("sender_email", ""))
+    request_id = data.get("request_id", "")
+    if not accepted_request_for_actor(profile, request_id):
+        return None, "Chat is locked until both sides accept the collaboration request."
+    body = (data.get("body") or "").strip()
+    message_type = data.get("message_type", "text")
+    file_name = data.get("file_name", "")
+    file_kind = data.get("file_kind", "")
+    file_url = ""
+    try:
+        if data.get("file_data"):
+            file_name, file_kind, file_url = save_uploaded_file(data)
+            message_type = "image" if (file_kind or "").startswith("image/") else "file"
+    except Exception as error:
+        return None, str(error)
+    if not body and not file_url:
+        return None, "Type a message or attach a file before sending."
+    messages = read_csv(MESSAGES_PATH, MESSAGE_HEADERS)
+    message = {
+        "id": data.get("id") or f"msg{int(time.time() * 1000)}",
+        "request_id": request_id,
+        "sender_email": profile.get("email", ""),
+        "sender_name": profile.get("name", "") or profile.get("email", ""),
+        "message_type": message_type,
+        "body": body,
+        "file_name": file_name,
+        "file_kind": file_kind,
+        "file_url": file_url,
+        "created_at": time.strftime("%Y-%m-%d %H:%M"),
+    }
+    messages.append(message)
+    write_csv(MESSAGES_PATH, MESSAGE_HEADERS, messages)
+    return message, messages_for_visible_requests(profile)
+
+
+def save_call_signal(data):
+    profile = read_profile(data.get("sender_email", ""))
+    request_id = data.get("request_id", "")
+    if not accepted_request_for_actor(profile, request_id):
+        return None, "Calls are locked until the collaboration request is accepted."
+    signal = {
+        "id": data.get("id") or f"sig{int(time.time() * 1000)}{secrets.randbelow(9999)}",
+        "request_id": request_id,
+        "sender_email": profile.get("email", ""),
+        "signal_type": data.get("signal_type", ""),
+        "payload": data.get("payload", {}),
+        "created_at": time.time(),
+    }
+    CALL_SIGNALS.append(signal)
+    cutoff = time.time() - 1800
+    CALL_SIGNALS[:] = [item for item in CALL_SIGNALS if item.get("created_at", 0) >= cutoff]
+    return signal, ""
+
+
+def visible_call_signals(profile, request_id):
+    if not accepted_request_for_actor(profile, request_id):
+        return []
+    return [
+        signal
+        for signal in CALL_SIGNALS
+        if signal.get("request_id") == request_id
+        and signal.get("sender_email", "").lower() != profile.get("email", "").lower()
+    ]
 
 
 def save_team(data):
-    profile = read_profile()
+    profile = read_profile(data.get("owner_email", ""))
     teams = read_csv(TEAMS_PATH, TEAM_HEADERS)
+    try:
+        team_size = str(min(10, max(2, int(data.get("team_size") or data.get("size") or "5"))))
+    except (TypeError, ValueError):
+        team_size = "5"
     team = {
         "id": data.get("id") or f"team{int(time.time())}",
         "owner_email": profile.get("email", ""),
         "team_name": data.get("team_name", "Untitled Team"),
         "idea": data.get("idea", ""),
         "project_type": data.get("project_type", "AI Product"),
-        "team_size": data.get("team_size") or data.get("size") or "5",
+        "team_size": team_size,
         "open_roles": data.get("open_roles", ""),
+        "role_counts": data.get("role_counts", ""),
         "status": "Recruiting",
         "created_at": time.strftime("%Y-%m-%d %H:%M"),
     }
@@ -252,21 +730,47 @@ def save_team(data):
 
 
 def save_request(data):
-    profile = read_profile()
+    profile = read_profile(data.get("from_email", ""))
     requests = read_csv(REQUESTS_PATH, REQUEST_HEADERS)
     request = {
         "id": data.get("id") or f"req{int(time.time())}",
-        "from_email": profile.get("email", ""),
+        "from_email": data.get("from_email") or profile.get("email", ""),
+        "target_email": data.get("target_email", ""),
         "target_name": data.get("target_name", ""),
         "target_role": data.get("target_role", ""),
+        "request_type": data.get("request_type", "Collaboration Request"),
         "project": data.get("project", "AI Product Collaboration"),
         "team_name": data.get("team_name", ""),
         "status": "In Progress",
         "created_at": time.strftime("%Y-%m-%d %H:%M"),
+        "updated_at": time.strftime("%Y-%m-%d %H:%M"),
     }
     requests.append(request)
     write_csv(REQUESTS_PATH, REQUEST_HEADERS, requests)
-    return request, [item for item in requests if item.get("from_email", "").lower() == profile.get("email", "").lower()]
+    return request, visible_requests_for(profile, requests)
+
+
+def update_request_status(data):
+    profile = read_profile(data.get("actor_email", ""))
+    actor = profile.get("email", "").lower()
+    request_id = data.get("id", "")
+    status = data.get("status", "")
+    allowed = {"Accepted", "Rejected", "Completed", "Completion Requested", "Leave Requested", "Ended"}
+    if status not in allowed:
+        return None, "Invalid request status."
+    requests = read_csv(REQUESTS_PATH, REQUEST_HEADERS)
+    for item in requests:
+        visible_to_actor = (
+            item.get("from_email", "").lower() == actor
+            or item.get("target_email", "").lower() == actor
+            or item.get("target_name", "").strip().lower() == profile.get("name", "").strip().lower()
+        )
+        if item.get("id") == request_id and visible_to_actor:
+            item["status"] = status
+            item["updated_at"] = time.strftime("%Y-%m-%d %H:%M")
+            write_csv(REQUESTS_PATH, REQUEST_HEADERS, requests)
+            return item, visible_requests_for(profile, requests)
+    return None, "Request not found for this account."
 
 
 def score_candidate(profile, candidate):
@@ -282,6 +786,16 @@ def score_candidate(profile, candidate):
     availability = overlap(profile.get("availability"), candidate.get("availability"))
     communication = overlap(profile.get("communication_style"), candidate.get("communication_style"))
     working = overlap(profile.get("working_style"), candidate.get("working_style"))
+    same_institution = (
+        profile.get("institution")
+        and candidate.get("institution")
+        and profile.get("institution", "").strip().lower() == candidate.get("institution", "").strip().lower()
+    )
+    same_company = (
+        profile.get("company")
+        and candidate.get("company")
+        and profile.get("company", "").strip().lower() == candidate.get("company", "").strip().lower()
+    )
 
     role_fit = role_matches_target(target_roles, candidate)
 
@@ -290,8 +804,10 @@ def score_candidate(profile, candidate):
     score += min(len(skill) * (14 if priority == "skill_first" else 11), 34)
     score += min(len(project) * 8, 12)
     score += min(len(interest) * 5, 12)
-    score += min(len(availability) * 4, 8)
+    score += min(len(availability) * (7 if priority == "availability_first" else 4), 10)
     score += min((len(communication) + len(working)) * 3, 8)
+    if same_institution or same_company:
+        score += 18 if priority == "organisation_first" else 7
     score = max(42, min(score, 98))
 
     reasons = []
@@ -309,6 +825,10 @@ def score_candidate(profile, candidate):
         reasons.append(f"overlapping availability ({', '.join(availability)})")
     if communication or working:
         reasons.append("profile-based working or communication compatibility")
+    if same_institution:
+        reasons.append(f"same institution ({candidate.get('institution')})")
+    if same_company:
+        reasons.append(f"same company ({candidate.get('company')})")
     if not reasons:
         reasons.append("general profile compatibility")
 
@@ -344,7 +864,12 @@ def score_team(profile, team):
     interest_overlap = overlap(profile.get("target_interests") or profile.get("interests"), team.get("idea"))
     goal_overlap = text_token_overlap(profile.get("target_goals") or profile.get("target_interests") or profile.get("interests"), team.get("idea"))
     stage_overlap = text_token_overlap(profile.get("target_stage"), team.get("idea") + " " + team.get("status", ""))
+    priority = profile.get("search_priority", "role_first")
+    team_text = f"{team.get('team_name', '')} {team.get('idea', '')} {team.get('status', '')}".lower()
+    same_institution = profile.get("institution") and profile.get("institution", "").lower() in team_text
     score = 40 + min(len(role_overlap) * 24, 36) + min(len(project_overlap) * 18, 18) + min(len(interest_overlap) * 8, 14) + min(len(goal_overlap) * 5, 12) + min(len(stage_overlap) * 4, 8)
+    if same_institution:
+        score += 14 if priority == "organisation_first" else 5
     score = min(score, 96)
     reasons = []
     if role_overlap:
@@ -353,6 +878,8 @@ def score_team(profile, team):
         reasons.append(f"same project type ({', '.join(project_overlap)})")
     if goal_overlap:
         reasons.append(f"team idea matches your target goals ({', '.join(goal_overlap[:4])})")
+    if same_institution:
+        reasons.append("team context is related to your institution")
     if not reasons:
         reasons.append("the team is actively recruiting and fits your collaboration direction")
     return {
@@ -388,6 +915,10 @@ def gemini_match(profile, candidates, mode):
             "availability": c.get("availability"),
             "working_style": c.get("working_style"),
             "communication_style": c.get("communication_style"),
+            "institution": c.get("institution"),
+            "company": c.get("company"),
+            "verification_status": c.get("verification_status"),
+            "reliability_score": c.get("reliability_score"),
         }
         for c in prepared_candidates[:6]
     ]
@@ -397,7 +928,8 @@ def gemini_match(profile, candidates, mode):
         "matching_standard": {
             "highest_priority": "The user's current search intent: target_roles and target_skills. A candidate matching the requested teammate role should rank higher than a candidate who only shares profile interests.",
             "medium_priority": "Target project type and target project direction.",
-            "lower_priority": "Profile context such as user's own availability, interests, working style and communication style. Use these as tie-breakers and compatibility support, not as the main ranking factor.",
+            "organisation_priority": "If search_priority is organisation_first, same institution or same company becomes a strong tie-breaker after role and skills. Do not ignore role and skill fit.",
+            "lower_priority": "Profile context such as user's own availability, interests, working style, communication style, verification status and reliability score. Use these as tie-breakers and compatibility support, not as the main ranking factor.",
             "explanation_rule": "Explain the recommendation by clearly separating requested teammate fit from profile-based compatibility."
         },
         "user_profile": profile,
@@ -462,12 +994,13 @@ def gemini_match(profile, candidates, mode):
 
 
 def get_teams():
-    return [
+    seeded = [
         {
             "team_name": "AI Campus Builders",
             "idea": "Build an AI assistant for student collaboration and study team planning.",
             "project_type": "AI Product",
             "open_roles": "ML Engineer;Backend Engineer;UI/UX Designer",
+            "role_counts": "ML Engineer:1;Backend Engineer:1;UI/UX Designer:1",
             "status": "Recruiting",
         },
         {
@@ -475,6 +1008,7 @@ def get_teams():
             "idea": "Prototype a sustainability app for campus waste reporting.",
             "project_type": "Competition",
             "open_roles": "Frontend Developer;Data Processing Engineer;Pitch Presenter",
+            "role_counts": "Frontend Developer:1;Data Processing Engineer:1;Pitch Presenter:1",
             "status": "Recruiting",
         },
         {
@@ -482,6 +1016,7 @@ def get_teams():
             "idea": "Create a lightweight research collaboration dashboard.",
             "project_type": "Research Project",
             "open_roles": "Backend Engineer;Product Designer",
+            "role_counts": "Backend Engineer:1;Product Designer:1",
             "status": "Recruiting",
         },
         {
@@ -489,6 +1024,7 @@ def get_teams():
             "idea": "Build a data processing pipeline and analytics dashboard for competition submissions.",
             "project_type": "AI Product",
             "open_roles": "Data Processing Engineer;Backend Engineer;Cloud Engineer",
+            "role_counts": "Data Processing Engineer:1;Backend Engineer:1;Cloud Engineer:1",
             "status": "Prototype building",
         },
         {
@@ -496,6 +1032,7 @@ def get_teams():
             "idea": "Design and test a polished product prototype for a student startup MVP.",
             "project_type": "Startup",
             "open_roles": "UI/UX Designer;Product Designer;Frontend Developer",
+            "role_counts": "UI/UX Designer:1;Product Designer:1;Frontend Developer:1",
             "status": "Idea validation",
         },
         {
@@ -503,6 +1040,7 @@ def get_teams():
             "idea": "Create a mobile app for smart campus services with API integration.",
             "project_type": "Mobile App",
             "open_roles": "Mobile Developer;Backend Engineer;UI/UX Designer",
+            "role_counts": "Mobile Developer:1;Backend Engineer:1;UI/UX Designer:1",
             "status": "MVP development",
         },
         {
@@ -510,6 +1048,7 @@ def get_teams():
             "idea": "Coordinate an open source learning platform and contributor onboarding workflow.",
             "project_type": "Web App",
             "open_roles": "Frontend Developer;Backend Engineer;Product Designer",
+            "role_counts": "Frontend Developer:1;Backend Engineer:1;Product Designer:1",
             "status": "Prototype building",
         },
         {
@@ -517,6 +1056,7 @@ def get_teams():
             "idea": "Prepare a startup pitch, demo video and business validation plan.",
             "project_type": "Startup",
             "open_roles": "Pitch Presenter;Product Designer;Data Processing Engineer",
+            "role_counts": "Pitch Presenter:1;Product Designer:1;Data Processing Engineer:1",
             "status": "Pitch preparation",
         },
         {
@@ -524,6 +1064,7 @@ def get_teams():
             "idea": "Build a cybersecurity reporting tool for smart campus safety and incident tracking.",
             "project_type": "Cybersecurity Tool",
             "open_roles": "Cybersecurity Analyst;Backend Engineer;QA Tester",
+            "role_counts": "Cybersecurity Analyst:1;Backend Engineer:1;QA Tester:1",
             "status": "Prototype building",
         },
         {
@@ -531,6 +1072,7 @@ def get_teams():
             "idea": "Prototype a virtual reality meeting space for remote student project teams.",
             "project_type": "VR Experience",
             "open_roles": "AR/VR Developer;UI/UX Designer;Full Stack Developer",
+            "role_counts": "AR/VR Developer:1;UI/UX Designer:1;Full Stack Developer:1",
             "status": "MVP development",
         },
         {
@@ -538,6 +1080,7 @@ def get_teams():
             "idea": "Create an analytics platform for collaboration outcomes, badges and team success patterns.",
             "project_type": "Data Platform",
             "open_roles": "Data Analyst;Data Processing Engineer;Cloud Engineer",
+            "role_counts": "Data Analyst:1;Data Processing Engineer:1;Cloud Engineer:1",
             "status": "Testing and QA",
         },
         {
@@ -545,6 +1088,7 @@ def get_teams():
             "idea": "Design prompt workflows and evaluation tools for explainable AI teammate recommendations.",
             "project_type": "AI Product",
             "open_roles": "AI Prompt Engineer;Machine Learning Engineer;Product Manager",
+            "role_counts": "AI Prompt Engineer:1;Machine Learning Engineer:1;Product Manager:1",
             "status": "User research",
         },
         {
@@ -552,9 +1096,11 @@ def get_teams():
             "idea": "Validate a startup idea with user interviews, pitch materials and market research.",
             "project_type": "Startup",
             "open_roles": "Business Analyst;Content Strategist;Pitch Presenter",
+            "role_counts": "Business Analyst:1;Content Strategist:1;Pitch Presenter:1",
             "status": "Idea validation",
         },
     ]
+    return [normalize_team(team) for team in seeded + read_csv(TEAMS_PATH, TEAM_HEADERS)]
 
 
 def get_competitions():
@@ -584,6 +1130,46 @@ def get_competitions():
             "teams": ["Founders Lab", "MarketFit Crew"],
         },
     ]
+
+
+def competition_entries_for(profile):
+    email = profile.get("email", "").lower()
+    return [
+        entry for entry in read_csv(COMPETITION_ENTRIES_PATH, COMPETITION_ENTRY_HEADERS)
+        if entry.get("owner_email", "").lower() == email
+    ]
+
+
+def join_competition(data):
+    profile = read_profile(data.get("owner_email", ""))
+    team_id = data.get("team_id", "")
+    competition_title = data.get("competition_title", "")
+    team = next((item for item in get_my_teams(profile.get("email")) if item.get("id") == team_id), None)
+    if not team:
+        return None, "Select one of your created teams before joining a competition."
+    if not competition_title:
+        return None, "Competition title is missing."
+    entries = read_csv(COMPETITION_ENTRIES_PATH, COMPETITION_ENTRY_HEADERS)
+    existing = next((
+        index for index, item in enumerate(entries)
+        if item.get("team_id") == team_id and item.get("competition_title") == competition_title
+    ), None)
+    entry = {
+        "id": data.get("id") or f"entry{int(time.time() * 1000)}",
+        "competition_title": competition_title,
+        "team_id": team_id,
+        "team_name": team.get("team_name", ""),
+        "owner_email": profile.get("email", ""),
+        "status": "Submitted",
+        "created_at": time.strftime("%Y-%m-%d %H:%M"),
+    }
+    if existing is None:
+        entries.append(entry)
+    else:
+        entry["id"] = entries[existing].get("id") or entry["id"]
+        entries[existing] = entry
+    write_csv(COMPETITION_ENTRIES_PATH, COMPETITION_ENTRY_HEADERS, entries)
+    return entry, competition_entries_for(profile)
 
 
 def get_conversations():
@@ -623,6 +1209,12 @@ class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
 
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        super().end_headers()
+
     def json_response(self, status, payload):
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
@@ -635,25 +1227,67 @@ class Handler(SimpleHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         return json.loads(self.rfile.read(length).decode("utf-8") or "{}")
 
+    def current_email(self):
+        auth = self.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            token = auth.split(" ", 1)[1].strip()
+            session = SESSIONS.get(token)
+            if session:
+                return session.get("email", "")
+        return ""
+
+    def require_email(self):
+        email = self.current_email()
+        if not email:
+            self.json_response(401, {"authenticated": False, "error": "Please log in first."})
+            return ""
+        return email
+
     def do_GET(self):
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         if path == "/":
             self.path = "/Link-up AI matching.html"
             return super().do_GET()
+        if path == "/api/session":
+            email = self.current_email()
+            if not email:
+                return self.json_response(200, {"authenticated": False})
+            return self.json_response(200, {"authenticated": True, "email": email, "profile": read_profile(email)})
         if path == "/api/data":
-            profile = read_profile()
+            email = self.require_email()
+            if not email:
+                return
+            profile = read_profile(email)
+            visible_requests = visible_requests_for(profile)
             return self.json_response(200, {
+                "authenticated": True,
                 "profile": profile,
                 "users": read_users(),
                 "teams": get_teams(),
                 "my_teams": get_my_teams(profile.get("email")),
-                "requests": [item for item in read_csv(REQUESTS_PATH, REQUEST_HEADERS) if item.get("from_email", "").lower() == profile.get("email", "").lower()],
+                "requests": visible_requests,
+                "chat_messages": messages_for_visible_requests(profile),
+                "competition_entries": competition_entries_for(profile),
                 "competitions": get_competitions(),
                 "conversations": get_conversations(),
                 "ai_provider": "gemini" if GEMINI_KEY else "fallback",
                 "gemini_model": ", ".join(GEMINI_MODEL_FALLBACKS),
                 "key_source": "environment" if os.environ.get("GEMINI_API_KEY", "").strip() else ("gemini_api_key.txt" if GEMINI_KEY else "none"),
             })
+        if path == "/api/messages":
+            email = self.require_email()
+            if not email:
+                return
+            profile = read_profile(email)
+            return self.json_response(200, {"messages": messages_for_visible_requests(profile)})
+        if path == "/api/calls/signals":
+            email = self.require_email()
+            if not email:
+                return
+            profile = read_profile(email)
+            request_id = parse_qs(parsed.query).get("request_id", [""])[0]
+            return self.json_response(200, {"signals": visible_call_signals(profile, request_id)})
         if path == "/api/settings":
             return self.json_response(200, {
                 "gemini_configured": bool(GEMINI_KEY),
@@ -666,8 +1300,51 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        print("POST PATH:", path)
+
+        # Register: request OTP
+        if path in ["/api/request-otp", "/api/register-send-otp", "/api/request-register-otp"]:
+            result, error = request_registration_otp(self.read_json())
+            if error:
+                return self.json_response(400, {"sent": False, "error": error})
+            return self.json_response(200, {"sent": True, **result})
+
+        # Register: verify OTP and create account
+        if path == "/api/register":
+            result, error = register_account(self.read_json())
+            if error:
+                return self.json_response(400, {"authenticated": False, "error": error})
+            return self.json_response(200, {"authenticated": True, **result})
+
+        # Login: request OTP
+        if path in ["/api/request-login-otp", "/api/login-send-otp"]:
+            result, error = request_login_otp(self.read_json())
+            if error:
+                return self.json_response(400, {"sent": False, "error": error})
+            return self.json_response(200, {"sent": True, **result})
+
+        # Login: verify OTP
+        if path in ["/api/verify-login-otp", "/api/verify-otp"]:
+            result, error = verify_login_otp(self.read_json())
+            if error:
+                return self.json_response(400, {"authenticated": False, "error": error})
+            return self.json_response(200, {"authenticated": True, **result})
+        if path == "/api/login":
+            result, error = login_account(self.read_json())
+            if error:
+                return self.json_response(400, {"authenticated": False, "error": error})
+            return self.json_response(200, {"authenticated": True, **result})
+        if path == "/api/logout":
+            auth = self.headers.get("Authorization", "")
+            if auth.startswith("Bearer "):
+                SESSIONS.pop(auth.split(" ", 1)[1].strip(), None)
+            return self.json_response(200, {"authenticated": False, "logged_out": True})
         if path == "/api/match":
+            email = self.require_email()
+            if not email:
+                return
             match_request = self.read_json()
+            match_request["email"] = email
             saved_profile, users = save_profile(match_request)
             profile = {**saved_profile, **match_request}
             mode = profile.get("mode", "individual")
@@ -701,17 +1378,76 @@ class Handler(SimpleHTTPRequestHandler):
                 "matches": fallback_match(profile, mode),
             })
         if path == "/api/profile":
+            email = self.require_email()
+            if not email:
+                return
             profile = self.read_json()
+            profile["email"] = email
             profile, users = save_profile(profile)
             return self.json_response(200, {"saved": True, "profile": profile, "users": len(users)})
         if path == "/api/teams":
-            team, teams = save_team(self.read_json())
+            email = self.require_email()
+            if not email:
+                return
+            data = self.read_json()
+            data["owner_email"] = email
+            team, teams = save_team(data)
             return self.json_response(200, {"saved": True, "team": team, "my_teams": teams})
         if path == "/api/requests":
-            request, requests = save_request(self.read_json())
+            email = self.require_email()
+            if not email:
+                return
+            data = self.read_json()
+            data["from_email"] = email
+            request, requests = save_request(data)
             return self.json_response(200, {"saved": True, "request": request, "requests": requests})
+        if path == "/api/requests/status":
+            email = self.require_email()
+            if not email:
+                return
+            data = self.read_json()
+            data["actor_email"] = email
+            request, result = update_request_status(data)
+            if not request:
+                return self.json_response(404, {"saved": False, "error": result})
+            return self.json_response(200, {"saved": True, "request": request, "requests": result})
+        if path == "/api/messages":
+            email = self.require_email()
+            if not email:
+                return
+            data = self.read_json()
+            data["sender_email"] = email
+            message, result = save_chat_message(data)
+            if not message:
+                return self.json_response(400, {"saved": False, "error": result})
+            return self.json_response(200, {"saved": True, "message": message, "messages": result})
+        if path == "/api/calls/signals":
+            email = self.require_email()
+            if not email:
+                return
+            data = self.read_json()
+            data["sender_email"] = email
+            signal, error = save_call_signal(data)
+            if not signal:
+                return self.json_response(400, {"saved": False, "error": error})
+            return self.json_response(200, {"saved": True, "signal": signal})
+        if path == "/api/competitions/join":
+            email = self.require_email()
+            if not email:
+                return
+            data = self.read_json()
+            data["owner_email"] = email
+            entry, result = join_competition(data)
+            if not entry:
+                return self.json_response(400, {"saved": False, "error": result})
+            return self.json_response(200, {"saved": True, "entry": entry, "competition_entries": result})
         if path == "/api/settings":
             global GEMINI_KEY
+            if not ALLOW_RUNTIME_KEY_SAVE:
+                return self.json_response(403, {
+                    "saved": False,
+                    "error": "Gemini API keys must be configured as cloud environment variables in the deployed version.",
+                })
             data = self.read_json()
             key = data.get("gemini_api_key", "").strip()
             if not key:
@@ -724,8 +1460,8 @@ class Handler(SimpleHTTPRequestHandler):
 
 if __name__ == "__main__":
     ensure_csv_exists()
-    print(f"Link-Up AI Matching is running at http://127.0.0.1:{PORT}")
+    print(f"Link-Up AI Matching is running at http://{HOST}:{PORT}")
     print(f"CSV storage file: {CSV_PATH}")
     print("Gemini API:", "enabled" if GEMINI_KEY else "not configured, using fallback AI")
     print("Gemini model order:", ", ".join(GEMINI_MODEL_FALLBACKS))
-    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()

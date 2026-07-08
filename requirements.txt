@@ -1,0 +1,11 @@
+# Link-Up 2.0 currently uses only Python standard-library modules.
+# No third-party Python packages are required for the current web server.
+#
+# Runtime modules used by the application:
+# - http.server / ThreadingHTTPServer
+# - csv, json, pathlib, os, re, secrets, time
+# - hashlib, hmac
+# - smtplib, ssl, email.message
+# - urllib.request for Gemini API HTTP calls
+#
+# This file is intentionally kept for cloud platforms such as Render.

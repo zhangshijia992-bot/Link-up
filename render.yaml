@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: link-up-ai-matching
+    env: python
+    buildCommand: ""
+    startCommand: "python run_linkup_ai_matching.py"
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.1-flash-lite
+      - key: LINKUP_SMTP_HOST
+        value: smtp.gmail.com
+      - key: LINKUP_SMTP_PORT
+        value: "465"
+      - key: LINKUP_SMTP_USER
+        sync: false
+      - key: LINKUP_SMTP_PASSWORD
+        sync: false
+      - key: LINKUP_SMTP_FROM
+        sync: false

@@ -7,7 +7,107 @@
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop stop-color='%232d6cff'/%3E%3Cstop offset='.55' stop-color='%2322d3ee'/%3E%3Cstop offset='1' stop-color='%2319d3a2'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='18' fill='url(%23g)'/%3E%3Ctext x='32' y='40' text-anchor='middle' font-size='22' font-family='Arial' font-weight='800' fill='white'%3ELU%3C/text%3E%3C/svg%3E" />
     <link rel="stylesheet" href="linkup-ai-matching.css" />
   </head>
-  <body>
+  <body class="auth-locked">
+    <section class="auth-screen" id="authScreen">
+      <div class="auth-card">
+        <div class="auth-brand auth-panel active" id="authWelcome">
+          <div class="brand-mark">LU</div>
+          <div>
+            <p class="eyebrow">Secure access</p>
+            <h1>Link-Up 2.0</h1>
+            <p>Enter a verified workspace for AI-powered teammate matching, team formation, collaboration lifecycle tracking, and outcome showcase.</p>
+          </div>
+          <div class="auth-entry-actions">
+            <button class="primary" type="button" data-auth-view="login">Login</button>
+            <button class="secondary" type="button" data-auth-view="register">Create an account</button>
+          </div>
+        </div>
+        <form class="auth-form auth-panel" id="loginForm" hidden>
+          <p class="eyebrow">Link-Up / secure access</p>
+          <h2>Login</h2>
+          <p class="muted">Enter your account details. Link-Up will require OTP before opening the workspace.</p>
+          <label>Email <input name="email" type="email" placeholder="student@email.com" required /></label>
+          <label>Password <input name="password" type="password" placeholder="At least 6 characters" required /></label>
+          <div class="dialog-actions">
+            <button class="primary" type="submit">Login and Send OTP</button>
+            <button class="secondary" type="button" data-auth-view="welcome">Back</button>
+          </div>
+        </form>
+        <form class="auth-form auth-panel" id="registerForm" hidden>
+          <p class="eyebrow">Link-Up / new account</p>
+          <h2>Create an account</h2>
+          <p class="muted">Register first, then verify OTP. Your profile questionnaire will appear before the internal workspace opens.</p>
+          <div class="form-grid">
+            <label>Name <input name="name" placeholder="Your name" required /></label>
+            <label>Email <input name="email" type="email" placeholder="student@email.com" required /></label>
+            <label>Password <input name="password" type="password" placeholder="At least 6 characters" required /></label>
+            <label>Current role
+              <select name="role"></select>
+            </label>
+          </div>
+          <div class="dialog-actions">
+            <button class="primary" type="submit">Create Account and Send OTP</button>
+            <button class="secondary" type="button" data-auth-view="welcome">Back</button>
+          </div>
+        </form>
+        <form class="auth-form auth-panel" id="otpForm" hidden>
+          <p class="eyebrow">Link-Up / email verification</p>
+          <h2>Email Verification</h2>
+          <p class="muted" id="otpIntro">Enter the OTP sent to your email.</p>
+          <div class="otp-message" id="otpMessage">OTP delivery status will appear here.</div>
+          <label>Enter OTP <input name="otp" inputmode="numeric" autocomplete="one-time-code" required /></label>
+          <div class="dialog-actions">
+            <button class="primary" type="submit">Verify OTP</button>
+            <button class="secondary" id="resendOtp" type="button">Resend OTP</button>
+            <button class="secondary" type="button" data-auth-view="welcome">Back</button>
+          </div>
+        </form>
+        <form class="auth-form auth-panel profile-setup-form" id="firstProfileForm" hidden>
+          <p class="eyebrow">Required first step</p>
+          <h2>Complete Your Profile</h2>
+          <p class="muted">Link-Up needs this questionnaire before AI Matching can work. The same information can be edited later in the sidebar Profile page.</p>
+          <div class="form-grid">
+            <label>Name <input name="name" required /></label>
+            <label>Email <input name="email" type="email" readonly /></label>
+            <label>University / Organisation
+              <select name="institution"></select>
+            </label>
+            <label>Organisation type
+              <select name="organisation_type">
+                <option>University Student</option>
+                <option>Freelancer</option>
+                <option>Startup Founder</option>
+                <option>Company Employee</option>
+                <option>Researcher</option>
+              </select>
+            </label>
+            <label>Company <input name="company" placeholder="Optional" /></label>
+            <label>Location <select name="location"></select></label>
+            <label>Study level <select name="study_level"></select></label>
+            <label>Major <select name="major"></select></label>
+            <label>Graduation year <select name="graduation_year"></select></label>
+            <label>Roles you can contribute
+              <select name="role" multiple size="7"></select>
+            </label>
+            <label>Availability
+              <select name="availability" multiple size="7"></select>
+            </label>
+          </div>
+          <label>Skills
+            <select name="skills" multiple size="10"></select>
+          </label>
+          <label>Interests
+            <select name="interests" multiple size="8"></select>
+          </label>
+          <label>Self introduction <textarea name="bio" placeholder="Briefly describe your background, collaboration style, and what kind of teammate you are.">Computer Science student interested in AI products, hackathons, and practical MVP building.</textarea></label>
+          <label>Portfolio <textarea name="portfolio">Campus AI Assistant;Course Planner UI;Hackathon Landing Page</textarea></label>
+          <div class="dialog-actions">
+            <button class="primary" type="submit">Save Profile and Enter Workspace</button>
+          </div>
+        </form>
+        <p class="muted auth-status" id="authStatus">Your account profile will be saved and reused for AI Matching.</p>
+      </div>
+    </section>
     <div class="desktop-app">
       <aside class="sidebar">
         <div class="brand">
@@ -23,7 +123,7 @@
           <button class="nav-item" data-view="search">Manual Search</button>
           <button class="nav-item" data-view="teams">Team Creation</button>
           <button class="nav-item" data-view="competitions">Competitions</button>
-          <button class="nav-item" data-view="messages">Messages</button>
+          <button class="nav-item" data-view="messages">Requests / Chat</button>
           <button class="nav-item" data-view="lifecycle">Lifecycle</button>
           <button class="nav-item" data-view="profile">Profile</button>
         </nav>
@@ -34,6 +134,11 @@
             <small>Checking backend...</small>
           </div>
         </div>
+        <div class="user-status" id="userStatus">
+          <strong id="signedInName">Guest</strong>
+          <small id="signedInEmail">Not signed in</small>
+          <button class="secondary" id="logoutButton" type="button">Log out</button>
+        </div>
       </aside>
 
       <main class="main">
@@ -41,7 +146,7 @@
         <section class="view active" id="home">
           <header class="hero">
             <div>
-              <p class="eyebrow">Link-Up 2.0 desktop prototype</p>
+              <p class="eyebrow">Link-Up 2.0 desktop platform</p>
               <h1>Build smarter teams with explainable AI matching.</h1>
               <p>
                 Find individuals, join active teams, recruit teammates, manage collaboration status,
@@ -53,11 +158,29 @@
                 <button class="secondary" data-jump="teams">Create Team</button>
               </div>
             </div>
-            <div class="hero-card">
-              <strong>Current data flow</strong>
-              <span>Questionnaire -> CSV candidate pool -> Gemini / fallback AI -> explainable match result</span>
-            </div>
           </header>
+
+          <section class="home-intro-video" id="homeIntroVideo" data-guide="intro-video">
+            <div class="intro-copy">
+              <p class="eyebrow">Visual onboarding</p>
+              <h2>Watch how Link-Up works</h2>
+              <p>
+                A short product walkthrough helps first-time users understand profile setup,
+                AI Matching, team formation, lifecycle tracking, and outcome sharing.
+              </p>
+              <button class="secondary" id="openIntroGuideInline" type="button">Open Guided Walkthrough</button>
+            </div>
+            <div class="video-shell">
+              <video class="intro-video" id="linkupIntroVideo" controls muted playsinline poster="assets/linkup_intro_poster.svg" data-video-src="assets/linkup_intro.mp4">
+                Your browser does not support the video tag.
+              </video>
+              <div class="video-fallback" id="introVideoFallback">
+                <span>Preview Walkthrough</span>
+                <strong>Profile -> AI Match -> Request -> Chat -> Outcome</strong>
+                <small>Replace assets/linkup_intro.mp4 with your final edited video.</small>
+              </div>
+            </div>
+          </section>
 
           <section class="function-grid">
             <article class="function-card" data-jump="ai">
@@ -202,6 +325,7 @@
           </div>
           <div class="two-col">
             <form class="panel form-panel" id="teamForm">
+              <input type="hidden" name="id" />
               <label>Team name <input name="team_name" value="AI Campus Builders" /></label>
               <label>Project idea <textarea name="idea">AI assistant that helps students form study and competition teams.</textarea></label>
               <label>Project type
@@ -220,27 +344,30 @@
                   <option>HealthTech</option>
                 </select>
               </label>
-              <label>Team size <input name="size" type="number" value="5" min="2" max="8" /></label>
+              <label>Team size <input name="size" type="number" value="5" min="2" max="10" /></label>
               <fieldset class="choice-set" data-name="team_roles">
-                <legend>Roles needed</legend>
-                <label><input type="checkbox" value="ML Engineer" checked />ML Engineer</label>
-                <label><input type="checkbox" value="Backend Engineer" checked />Backend Engineer</label>
-                <label><input type="checkbox" value="UI/UX Designer" checked />UI/UX Designer</label>
-                <label><input type="checkbox" value="Data Processing Engineer" />Data Processing Engineer</label>
-                <label><input type="checkbox" value="Frontend Developer" />Frontend Developer</label>
-                <label><input type="checkbox" value="Full Stack Developer" />Full Stack Developer</label>
-                <label><input type="checkbox" value="Cloud Engineer" />Cloud Engineer</label>
-                <label><input type="checkbox" value="DevOps Engineer" />DevOps Engineer</label>
-                <label><input type="checkbox" value="Mobile Developer" />Mobile Developer</label>
-                <label><input type="checkbox" value="AR/VR Developer" />AR/VR Developer</label>
-                <label><input type="checkbox" value="Cybersecurity Analyst" />Cybersecurity Analyst</label>
-                <label><input type="checkbox" value="QA Tester" />QA Tester</label>
-                <label><input type="checkbox" value="Business Analyst" />Business Analyst</label>
-                <label><input type="checkbox" value="AI Prompt Engineer" />AI Prompt Engineer</label>
-                <label><input type="checkbox" value="Pitch Presenter" />Pitch Presenter</label>
-                <label><input type="checkbox" value="Content Strategist" />Content Strategist</label>
+                <legend>Open roles and needed quantity</legend>
+                <label class="role-count-row"><input type="checkbox" value="Machine Learning Engineer" checked /><span>Machine Learning Engineer</span><input class="role-count" type="number" min="1" max="10" value="1" aria-label="Machine Learning Engineer quantity" /></label>
+                <label class="role-count-row"><input type="checkbox" value="Backend Engineer" checked /><span>Backend Engineer</span><input class="role-count" type="number" min="1" max="10" value="2" aria-label="Backend Engineer quantity" /></label>
+                <label class="role-count-row"><input type="checkbox" value="UI/UX Designer" checked /><span>UI/UX Designer</span><input class="role-count" type="number" min="1" max="10" value="1" aria-label="UI/UX Designer quantity" /></label>
+                <label class="role-count-row"><input type="checkbox" value="Data Processing Engineer" /><span>Data Processing Engineer</span><input class="role-count" type="number" min="1" max="10" value="1" aria-label="Data Processing Engineer quantity" /></label>
+                <label class="role-count-row"><input type="checkbox" value="Frontend Developer" /><span>Frontend Developer</span><input class="role-count" type="number" min="1" max="10" value="1" aria-label="Frontend Developer quantity" /></label>
+                <label class="role-count-row"><input type="checkbox" value="Full Stack Developer" /><span>Full Stack Developer</span><input class="role-count" type="number" min="1" max="10" value="1" aria-label="Full Stack Developer quantity" /></label>
+                <label class="role-count-row"><input type="checkbox" value="Cloud Engineer" /><span>Cloud Engineer</span><input class="role-count" type="number" min="1" max="10" value="1" aria-label="Cloud Engineer quantity" /></label>
+                <label class="role-count-row"><input type="checkbox" value="DevOps Engineer" /><span>DevOps Engineer</span><input class="role-count" type="number" min="1" max="10" value="1" aria-label="DevOps Engineer quantity" /></label>
+                <label class="role-count-row"><input type="checkbox" value="Mobile Developer" /><span>Mobile Developer</span><input class="role-count" type="number" min="1" max="10" value="1" aria-label="Mobile Developer quantity" /></label>
+                <label class="role-count-row"><input type="checkbox" value="AR/VR Developer" /><span>AR/VR Developer</span><input class="role-count" type="number" min="1" max="10" value="1" aria-label="AR/VR Developer quantity" /></label>
+                <label class="role-count-row"><input type="checkbox" value="Cybersecurity Analyst" /><span>Cybersecurity Analyst</span><input class="role-count" type="number" min="1" max="10" value="1" aria-label="Cybersecurity Analyst quantity" /></label>
+                <label class="role-count-row"><input type="checkbox" value="QA Tester" /><span>QA Tester</span><input class="role-count" type="number" min="1" max="10" value="1" aria-label="QA Tester quantity" /></label>
+                <label class="role-count-row"><input type="checkbox" value="Business Analyst" /><span>Business Analyst</span><input class="role-count" type="number" min="1" max="10" value="1" aria-label="Business Analyst quantity" /></label>
+                <label class="role-count-row"><input type="checkbox" value="AI Prompt Engineer" /><span>AI Prompt Engineer</span><input class="role-count" type="number" min="1" max="10" value="1" aria-label="AI Prompt Engineer quantity" /></label>
+                <label class="role-count-row"><input type="checkbox" value="Pitch Presenter" /><span>Pitch Presenter</span><input class="role-count" type="number" min="1" max="10" value="1" aria-label="Pitch Presenter quantity" /></label>
+                <label class="role-count-row"><input type="checkbox" value="Content Strategist" /><span>Content Strategist</span><input class="role-count" type="number" min="1" max="10" value="1" aria-label="Content Strategist quantity" /></label>
               </fieldset>
-              <button class="primary" type="submit">Publish Team Opportunity</button>
+              <div class="dialog-actions team-form-actions">
+                <button class="secondary" type="button" id="cancelTeamEdit" hidden>Cancel Edit</button>
+                <button class="primary" type="submit" id="saveTeamButton">Publish Team Opportunity</button>
+              </div>
             </form>
             <section class="panel">
               <h3>Recruitment preview</h3>
@@ -267,10 +394,11 @@
           <div class="page-head">
             <div>
               <p class="eyebrow">Focused communication</p>
-              <h2>Messages</h2>
-              <p>Chats unlock only after collaboration request acceptance or team creation.</p>
+              <h2>Messages & Requests</h2>
+              <p>Manage incoming requests, outgoing requests, decisions, and unlocked collaboration chats.</p>
             </div>
           </div>
+          <div class="panel request-center" id="requestCenter"></div>
           <div class="message-layout">
             <div class="panel conversation-list" id="conversationList"></div>
             <div class="panel chat-room" id="chatRoom"></div>
@@ -282,7 +410,7 @@
             <div>
               <p class="eyebrow">After matching</p>
               <h2>Collaboration Lifecycle</h2>
-              <p>Track request, active collaboration, completion confirmation, leave request, and outcome sharing.</p>
+              <p>Each request becomes one lifecycle card: pending, accepted, rejected, active, completed, or ended.</p>
             </div>
           </div>
           <div class="timeline" id="timeline"></div>
@@ -304,30 +432,36 @@
               <form class="form-panel" id="profileForm">
                 <label>Name <input name="name" value="Alex Tan" /></label>
                 <label>Email <input name="email" value="alex.tan@linkup.demo" /></label>
-                <label>Role
-                  <select name="role">
-                    <option>Frontend Developer</option>
-                    <option>Backend Engineer</option>
-                    <option>Machine Learning Engineer</option>
-                    <option>UI/UX Designer</option>
-                    <option>Product Designer</option>
-                    <option>Data Processing Engineer</option>
-                    <option>Full Stack Developer</option>
-                    <option>Data Analyst</option>
-                    <option>Cloud Engineer</option>
-                    <option>DevOps Engineer</option>
-                    <option>Mobile Developer</option>
-                    <option>AR/VR Developer</option>
-                    <option>Cybersecurity Analyst</option>
-                    <option>QA Tester</option>
-                    <option>Business Analyst</option>
-                    <option>AI Prompt Engineer</option>
-                    <option>Pitch Presenter</option>
-                    <option>Content Strategist</option>
+                <label>University / Organisation
+                  <select name="institution" id="profileInstitution"></select>
+                </label>
+                <label>Organisation type
+                  <select name="organisation_type">
+                    <option>University Student</option>
+                    <option>Freelancer</option>
+                    <option>Startup Founder</option>
+                    <option>Company Employee</option>
+                    <option>Researcher</option>
                   </select>
                 </label>
-                <label>Skills <input name="skills" value="React;Python;UI/UX" /></label>
-                <label>Interests <input name="interests" value="AI startups;Hackathons;EdTech" /></label>
+                <label>Company <input name="company" placeholder="Optional company or startup" /></label>
+                <label>Location <select name="location"></select></label>
+                <label>Study level <select name="study_level"></select></label>
+                <label>Major <select name="major"></select></label>
+                <label>Graduation year <select name="graduation_year"></select></label>
+                <label>Roles you can contribute
+                  <select name="role" multiple size="7"></select>
+                </label>
+                <label>Availability
+                  <select name="availability" multiple size="7"></select>
+                </label>
+                <label>Skills
+                  <select name="skills" multiple size="10"></select>
+                </label>
+                <label>Interests
+                  <select name="interests" multiple size="8"></select>
+                </label>
+                <label>Self introduction <textarea name="bio" placeholder="Briefly describe your background, collaboration style, and what kind of teammate you are.">Computer Science student interested in AI products, hackathons, and practical MVP building.</textarea></label>
                 <label>Portfolio <textarea name="portfolio">Campus AI Assistant;Course Planner UI;Hackathon Landing Page</textarea></label>
                 <button class="primary" type="submit">Save Profile</button>
                 <p class="muted" id="profileSaveStatus">Profile changes will sync to matching data.</p>

@@ -1,7 +1,9 @@
-id,from_email,target_name,target_role,project,team_name,status,created_at
-req1782441425,alex.tan@linkup.demo,Victor Tan,Backend Engineer,AI assistant that helps students form study and competition teams.,AI Campus Builders,In Progress,2026-06-26 10:37
-req1782441428,alex.tan@linkup.demo,Kevin Johnson,Data Processing Engineer,AI assistant that helps students form study and competition teams.,AI Campus Builders,In Progress,2026-06-26 10:37
-req1782441429,alex.tan@linkup.demo,Nina Garcia,Machine Learning Engineer,AI assistant that helps students form study and competition teams.,AI Campus Builders,In Progress,2026-06-26 10:37
-req1782441431,alex.tan@linkup.demo,Alex Tan,Data Processing Engineer,AI assistant that helps students form study and competition teams.,AI Campus Builders,In Progress,2026-06-26 10:37
-req1782441432,alex.tan@linkup.demo,Sarah Chen,Frontend Developer,AI assistant that helps students form study and competition teams.,AI Campus Builders,In Progress,2026-06-26 10:37
-req1782707346,alex.tan@linkup.demo,Mobile Sprint Lab,Mobile Developer;Backend Engineer;UI/UX Designer needed,AI Product Collaboration,AI Campus Builders,In Progress,2026-06-29 12:29
+id,from_email,target_email,target_name,target_role,request_type,project,team_name,status,created_at,updated_at
+req1782441425,alex.tan@linkup.demo,,Victor Tan,Backend Engineer,,AI assistant that helps students form study and competition teams.,AI Campus Builders,In Progress,2026-06-26 10:37,
+req1782441428,alex.tan@linkup.demo,,Kevin Johnson,Data Processing Engineer,,AI assistant that helps students form study and competition teams.,AI Campus Builders,In Progress,2026-06-26 10:37,
+req1782441429,alex.tan@linkup.demo,,Nina Garcia,Machine Learning Engineer,,AI assistant that helps students form study and competition teams.,AI Campus Builders,In Progress,2026-06-26 10:37,
+req1782441431,alex.tan@linkup.demo,,Alex Tan,Data Processing Engineer,,AI assistant that helps students form study and competition teams.,AI Campus Builders,In Progress,2026-06-26 10:37,
+req1782441432,alex.tan@linkup.demo,,Sarah Chen,Frontend Developer,,AI assistant that helps students form study and competition teams.,AI Campus Builders,In Progress,2026-06-26 10:37,
+req1782707346,alex.tan@linkup.demo,,Mobile Sprint Lab,Mobile Developer;Backend Engineer;UI/UX Designer needed,,AI Product Collaboration,AI Campus Builders,In Progress,2026-06-29 12:29,
+req1783402037,zhangshijia992@gmail.com,,Chloe Tanaka,Frontend Developer,,AI Product Collaboration,,In Progress,2026-07-07 13:27,
+req1783422001,zsjhappy2024@126.com,zhangshijia992@gmail.com,Zhang Shijia,Backend Engineer,,AI Product Collaboration,,Accepted,2026-07-07 19:00,2026-07-07 19:32

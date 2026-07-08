@@ -3,8 +3,19 @@ __pycache__/
 *.log
 server.err
 server.log
+server.*.log
 gemini_api_key.txt
+accounts.csv
 ui-premium-preview*.png
 .env
+.env.*
 .venv/
 node_modules/
+assets/uploads/
+pptx_build_tmp/
+pptx_preview/
+Link-Up 2.0 HCI Assignment 2 Presentation/
+*.pptx
+figma-*.png
+inspect_export.mjs
+build_linkup_presentation.mjs

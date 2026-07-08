@@ -1,3 +1,4 @@
-id,owner_email,team_name,idea,project_type,team_size,open_roles,status,created_at
-team1782441141,alex.tan@linkup.demo,AI Campus Builders,AI assistant that helps students form study and competition teams.,Mobile App,8,ML Engineer;Backend Engineer;UI/UX Designer;Data Processing Engineer;Pitch Presenter,Recruiting,2026-06-26 10:32
-team1782441152,alex.tan@linkup.demo,AI Campus Builders,AI assistant that helps students form study and competition teams.,Mobile App,8,ML Engineer;Backend Engineer;UI/UX Designer;Data Processing Engineer;Pitch Presenter,Recruiting,2026-06-26 10:32
+id,owner_email,team_name,idea,project_type,team_size,open_roles,role_counts,status,created_at
+team1782441141,alex.tan@linkup.demo,AI Campus Builders,AI assistant that helps students form study and competition teams.,Mobile App,8,ML Engineer;Backend Engineer;UI/UX Designer;Data Processing Engineer;Pitch Presenter,,Recruiting,2026-06-26 10:32
+team1782441152,alex.tan@linkup.demo,AI Campus Builders,AI assistant that helps students form study and competition teams.,Mobile App,8,ML Engineer;Backend Engineer;UI/UX Designer;Data Processing Engineer;Pitch Presenter,,Recruiting,2026-06-26 10:32
+team1783473765,zhangshijia992@gmail.com,AI Campus Builders,AI assistant that helps students form study and competition teams.,AI Product,6,Machine Learning Engineer;Backend Engineer;UI/UX Designer;Data Processing Engineer;Frontend Developer,Machine Learning Engineer:1;Backend Engineer:2;UI/UX Designer:1;Data Processing Engineer:1;Frontend Developer:1,Recruiting,2026-07-08 09:22

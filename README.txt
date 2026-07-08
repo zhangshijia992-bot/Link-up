@@ -140,6 +140,50 @@ gemini_api_key.txt
 
 This file is ignored by GitHub and will not be uploaded.
 
+## 5A. Deploy to Cloud with Render
+
+Because this project has a Python backend and API routes, do **not** deploy it with GitHub Pages. GitHub Pages is only for static websites and cannot run the Python `/api/match` backend.
+
+Recommended cloud platform for this prototype:
+
+```text
+Render Web Service
+```
+
+### Steps
+
+1. Push the latest project to GitHub.
+2. Go to Render.
+3. Create a new **Web Service** from the GitHub repository.
+4. Use these settings:
+
+```text
+Environment: Python
+Build Command: leave empty
+Start Command: python run_linkup_ai_matching.py
+```
+
+5. Add this environment variable in Render:
+
+```text
+GEMINI_API_KEY = your own Gemini API key
+```
+
+Optional:
+
+```text
+GEMINI_MODEL = gemini-3.1-flash-lite
+```
+
+6. Deploy the service.
+7. Render will give a public URL. Share that URL with teammates or the lecturer.
+
+### Important Cloud Note
+
+In the cloud version, users should not paste API keys into the website. The Gemini key should be configured in Render environment variables. This protects the API key from being changed or exposed through the public website.
+
+CSV files are suitable for this alpha prototype. However, cloud services may reset local file changes after redeployment. For a real product, CSV storage should be upgraded to a cloud database.
+
 ## 6. How to Use the Platform
 
 ### Home
