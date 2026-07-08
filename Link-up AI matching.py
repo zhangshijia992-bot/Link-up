@@ -631,9 +631,7 @@ def login_account(data):
 
 
 def read_users():
-    ensure_csv_exists()
-    with CSV_PATH.open("r", newline="", encoding="utf-8-sig") as file:
-        users = list(csv.DictReader(file))
+    users = read_csv(CSV_PATH, HEADERS)
     institutions = [
         "Asia Pacific University of Technology & Innovation (APU)",
         "Universiti Malaya (UM)",
@@ -661,11 +659,7 @@ def read_users():
 
 
 def write_users(users):
-    with CSV_PATH.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=HEADERS)
-        writer.writeheader()
-        for user in users:
-            writer.writerow({key: user.get(key, "") for key in HEADERS})
+    write_csv(CSV_PATH, HEADERS, users)
 
 
 def split_values(value):
