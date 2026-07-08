@@ -184,6 +184,36 @@ In the cloud version, users should not paste API keys into the website. The Gemi
 
 CSV files are suitable for this alpha prototype. However, cloud services may reset local file changes after redeployment. For a real product, CSV storage should be upgraded to a cloud database.
 
+## 5B. OTP Email Delivery
+
+For cloud deployment, use a transactional email API instead of a personal Gmail SMTP account.
+
+Recommended provider:
+
+```text
+Resend
+```
+
+Set these environment variables in the cloud platform:
+
+```text
+LINKUP_EMAIL_PROVIDER = resend
+RESEND_API_KEY = your Resend API key
+LINKUP_EMAIL_FROM = Link-Up 2.0 <your verified sender email>
+```
+
+Gmail SMTP is kept only as a fallback for local testing:
+
+```text
+LINKUP_SMTP_HOST
+LINKUP_SMTP_PORT
+LINKUP_SMTP_USER
+LINKUP_SMTP_PASSWORD
+LINKUP_SMTP_FROM
+```
+
+For a public website, Resend, SendGrid, Mailgun, Amazon SES, or Azure Communication Services Email is more reliable than sending OTP codes through a personal Gmail mailbox.
+
 ## 6. How to Use the Platform
 
 ### Home

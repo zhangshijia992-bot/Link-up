@@ -69,6 +69,9 @@ def load_gemini_key():
 
 
 GEMINI_KEY = load_gemini_key()
+EMAIL_PROVIDER = os.environ.get("LINKUP_EMAIL_PROVIDER", "").strip().lower()
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "").strip()
+RESEND_FROM = os.environ.get("LINKUP_EMAIL_FROM", os.environ.get("RESEND_FROM", "")).strip()
 SMTP_HOST = os.environ.get("LINKUP_SMTP_HOST", "").strip()
 SMTP_PORT = int(os.environ.get("LINKUP_SMTP_PORT", "587"))
 SMTP_USER = os.environ.get("LINKUP_SMTP_USER", "").strip()
@@ -183,16 +186,9 @@ def password_digest(password, salt):
 
 def read_accounts():
     return read_csv(ACCOUNTS_PATH, ACCOUNT_HEADERS)
-def send_otp_email(to_email, otp, purpose="verification"):
-    print("SMTP CONFIG:", SMTP_HOST, SMTP_PORT, SMTP_USER, bool(SMTP_PASSWORD), flush=True)
-    print("SENDING OTP EMAIL TO:", to_email, flush=True)
 
-    if not SMTP_HOST or not SMTP_USER or not SMTP_PASSWORD:
-        if not IS_CLOUD_DEPLOYMENT:
-            print("SMTP not configured. Local prototype will show OTP on screen.", flush=True)
-            return ""
-        return "Email OTP is not configured. Please set LINKUP_SMTP_HOST, LINKUP_SMTP_USER, and LINKUP_SMTP_PASSWORD."
 
+def build_otp_message(otp, purpose="verification"):
     subject = "Your Link-Up 2.0 verification code"
     body = f"""Hello,
 
@@ -207,7 +203,46 @@ If you did not request this code, please ignore this email.
 Link-Up 2.0
 AI Team Formation Workspace
 """
+    return subject, body
 
+
+def send_resend_email(to_email, subject, body):
+    if not RESEND_API_KEY or not RESEND_FROM:
+        return "Resend email provider is not configured. Please set RESEND_API_KEY and LINKUP_EMAIL_FROM."
+    payload = {
+        "from": RESEND_FROM,
+        "to": [to_email],
+        "subject": subject,
+        "text": body,
+    }
+    request = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            if response.status in {200, 201, 202}:
+                print("OTP EMAIL SENT BY RESEND", flush=True)
+                return ""
+            detail = response.read().decode("utf-8", errors="replace")
+            return f"Resend email failed with HTTP {response.status}: {detail}"
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        print("RESEND EMAIL ERROR:", error.code, detail[:300], flush=True)
+        return f"Resend email failed with HTTP {error.code}: {detail}"
+    except Exception as error:
+        print("RESEND EMAIL ERROR:", repr(error), flush=True)
+        return f"Resend email failed: {error}"
+
+
+def send_smtp_email(to_email, subject, body):
+    if not SMTP_HOST or not SMTP_USER or not SMTP_PASSWORD:
+        return "SMTP email provider is not configured. Please set LINKUP_SMTP_HOST, LINKUP_SMTP_USER, and LINKUP_SMTP_PASSWORD."
     message = EmailMessage()
     message["Subject"] = subject
     message["From"] = SMTP_FROM or SMTP_USER
@@ -215,37 +250,56 @@ AI Team Formation Workspace
     message.set_content(body)
 
     try:
-        print("SMTP STEP 1: connecting...", flush=True)
+        print("SMTP OTP SEND STARTED", flush=True)
 
         if SMTP_PORT == 465:
             context = ssl.create_default_context()
             with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=15, context=context) as server:
-                print("SMTP STEP 2: connected by SSL", flush=True)
                 server.login(SMTP_USER, SMTP_PASSWORD)
-                print("SMTP STEP 3: logged in", flush=True)
                 server.send_message(message)
-                print("SMTP STEP 4: message sent", flush=True)
 
         else:
             with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
-                print("SMTP STEP 2: connected", flush=True)
                 server.ehlo()
-                print("SMTP STEP 3: ehlo ok", flush=True)
                 server.starttls(context=ssl.create_default_context())
-                print("SMTP STEP 4: starttls ok", flush=True)
                 server.ehlo()
-                print("SMTP STEP 5: second ehlo ok", flush=True)
                 server.login(SMTP_USER, SMTP_PASSWORD)
-                print("SMTP STEP 6: logged in", flush=True)
                 server.send_message(message)
-                print("SMTP STEP 7: message sent", flush=True)
 
-        print("OTP EMAIL SENT SUCCESSFULLY TO:", to_email, flush=True)
+        print("OTP EMAIL SENT BY SMTP", flush=True)
         return ""
 
     except Exception as error:
-        print("OTP EMAIL ERROR:", repr(error), flush=True)
+        print("SMTP EMAIL ERROR:", repr(error), flush=True)
         return f"Failed to send OTP email: {error}"
+
+
+def send_otp_email(to_email, otp, purpose="verification"):
+    subject, body = build_otp_message(otp, purpose)
+    provider = EMAIL_PROVIDER or ("resend" if RESEND_API_KEY else "smtp")
+    print(f"SENDING OTP EMAIL USING {provider.upper()}", flush=True)
+
+    if provider == "resend":
+        error = send_resend_email(to_email, subject, body)
+        if not error:
+            return ""
+        if SMTP_HOST and SMTP_USER and SMTP_PASSWORD:
+            print("RESEND FAILED; TRYING SMTP FALLBACK", flush=True)
+            return send_smtp_email(to_email, subject, body)
+        if not IS_CLOUD_DEPLOYMENT:
+            print("Email provider failed locally. Prototype will show OTP on screen.", flush=True)
+            return ""
+        return error
+
+    if SMTP_HOST and SMTP_USER and SMTP_PASSWORD:
+        return send_smtp_email(to_email, subject, body)
+
+    if not IS_CLOUD_DEPLOYMENT:
+        print("Email provider not configured. Local prototype will show OTP on screen.", flush=True)
+        return ""
+
+    return "Email OTP is not configured. Please set RESEND_API_KEY and LINKUP_EMAIL_FROM, or configure SMTP fallback."
+
 
 def otp_cooldown_payload(email, purpose, now):
     existing = PENDING_OTPS.get(email)

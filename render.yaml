@@ -11,6 +11,12 @@ services:
         value: gemini-3.1-flash-lite
       - key: LINKUP_DATA_DIR
         value: /home/linkup-data
+      - key: LINKUP_EMAIL_PROVIDER
+        value: resend
+      - key: RESEND_API_KEY
+        sync: false
+      - key: LINKUP_EMAIL_FROM
+        sync: false
       - key: LINKUP_SMTP_HOST
         value: smtp.gmail.com
       - key: LINKUP_SMTP_PORT
