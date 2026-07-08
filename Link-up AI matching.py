@@ -28,10 +28,21 @@ IS_CLOUD_DEPLOYMENT = bool(
     or os.environ.get("RENDER")
     or os.environ.get("RAILWAY_ENVIRONMENT")
 )
-DATA_ROOT = Path(
-    os.environ.get("LINKUP_DATA_DIR")
-    or ((Path(os.environ.get("HOME")) / "linkup-data") if (IS_CLOUD_DEPLOYMENT and os.environ.get("HOME")) else ROOT)
-)
+def resolve_data_root():
+    configured = os.environ.get("LINKUP_DATA_DIR", "").strip()
+    if configured:
+        return Path(configured)
+    if IS_CLOUD_DEPLOYMENT:
+        home_dir = os.environ.get("HOME") or os.environ.get("HOME_EXPANDED")
+        if home_dir:
+            return Path(home_dir) / "linkup-data"
+        azure_windows_home = Path("D:/home")
+        if azure_windows_home.exists():
+            return azure_windows_home / "linkup-data"
+    return ROOT
+
+
+DATA_ROOT = resolve_data_root()
 DATA_ROOT.mkdir(parents=True, exist_ok=True)
 CSV_PATH = DATA_ROOT / "users.csv"
 PROFILE_PATH = DATA_ROOT / "profile.csv"
@@ -1405,6 +1416,18 @@ class Handler(SimpleHTTPRequestHandler):
             })
         if path == "/api/users":
             return self.json_response(200, {"users": read_users()})
+        if path == "/api/storage-health":
+            return self.json_response(200, {
+                "cloud": IS_CLOUD_DEPLOYMENT,
+                "data_root": str(DATA_ROOT),
+                "data_root_exists": DATA_ROOT.exists(),
+                "accounts_file_exists": ACCOUNTS_PATH.exists(),
+                "accounts_count": len(read_accounts()),
+                "users_count": len(read_users()),
+                "teams_count": len(read_csv(TEAMS_PATH, TEAM_HEADERS)),
+                "requests_count": len(read_csv(REQUESTS_PATH, REQUEST_HEADERS)),
+                "messages_count": len(read_csv(MESSAGES_PATH, MESSAGE_HEADERS)),
+            })
         return super().do_GET()
 
     def do_POST(self):
