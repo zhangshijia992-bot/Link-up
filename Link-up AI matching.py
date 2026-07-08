@@ -86,6 +86,7 @@ COMPETITION_ENTRY_HEADERS = ["id", "competition_title", "team_id", "team_name", 
 SESSIONS = {}
 PENDING_OTPS = {}
 CALL_SIGNALS = []
+OTP_COOLDOWN_SECONDS = 60
 
 DEFAULT_PROFILE = {
     "id": "me",
@@ -239,6 +240,23 @@ AI Team Formation Workspace
         print("OTP EMAIL ERROR:", repr(error), flush=True)
         return f"Failed to send OTP email: {error}"
 
+def otp_cooldown_payload(email, purpose, now):
+    existing = PENDING_OTPS.get(email)
+    if not existing or existing.get("purpose") != purpose or existing.get("expires_at", 0) <= now:
+        return None
+    last_sent_at = existing.get("last_sent_at", 0)
+    wait_seconds = int(OTP_COOLDOWN_SECONDS - (now - last_sent_at))
+    if wait_seconds <= 0:
+        return None
+    return {
+        "email": email,
+        "sent": False,
+        "cooldown_seconds": wait_seconds,
+        "expires_in_minutes": max(1, int((existing.get("expires_at", now) - now) // 60)),
+        "delivery": f"An OTP was already sent. Please wait {wait_seconds} seconds before requesting another one.",
+    }
+
+
 def request_registration_otp(data):
     email = data.get("email", "").strip().lower()
 
@@ -248,13 +266,19 @@ def request_registration_otp(data):
     if any(account.get("email", "").lower() == email for account in read_accounts()):
         return None, "This email is already registered. Please log in instead."
 
+    now = time.time()
+    cooldown = otp_cooldown_payload(email, "register", now)
+    if cooldown:
+        return cooldown, ""
+
     otp = f"{secrets.randbelow(900000) + 100000}"
 
     PENDING_OTPS[email] = {
         "otp": otp,
-        "expires_at": time.time() + 600,
+        "expires_at": now + 600,
         "attempts": 0,
         "purpose": "register",
+        "last_sent_at": now,
     }
 
     email_error = send_otp_email(email, otp, "registration")
@@ -264,7 +288,9 @@ def request_registration_otp(data):
 
     payload = {
         "email": email,
+        "sent": True,
         "expires_in_minutes": 10,
+        "cooldown_seconds": OTP_COOLDOWN_SECONDS,
         "delivery": "OTP has been sent to your email." if (SMTP_HOST and SMTP_USER and SMTP_PASSWORD) else "Prototype OTP is shown on screen.",
     }
     if not (SMTP_HOST and SMTP_USER and SMTP_PASSWORD):
@@ -310,13 +336,19 @@ def request_login_otp(data):
     if error:
         return None, error
 
+    now = time.time()
+    cooldown = otp_cooldown_payload(email, "login", now)
+    if cooldown:
+        return cooldown, ""
+
     otp = f"{secrets.randbelow(900000) + 100000}"
 
     PENDING_OTPS[email] = {
         "otp": otp,
-        "expires_at": time.time() + 600,
+        "expires_at": now + 600,
         "attempts": 0,
         "purpose": "login",
+        "last_sent_at": now,
     }
 
     email_error = send_otp_email(email, otp, "login verification")
@@ -326,7 +358,9 @@ def request_login_otp(data):
 
     payload = {
         "email": email,
+        "sent": True,
         "expires_in_minutes": 10,
+        "cooldown_seconds": OTP_COOLDOWN_SECONDS,
         "delivery": "OTP has been sent to your email." if (SMTP_HOST and SMTP_USER and SMTP_PASSWORD) else "Prototype OTP is shown on screen.",
     }
     if not (SMTP_HOST and SMTP_USER and SMTP_PASSWORD):

@@ -19,6 +19,8 @@ let suppressNextAssistantClick = false;
 let assistantDragState = null;
 let authToken = localStorage.getItem("linkup_auth_token") || "";
 let pendingAuth = null;
+let otpCooldownTimer = null;
+let otpCooldownUntil = 0;
 const introSteps = [
   {
     title: "Find the right people",
@@ -248,6 +250,55 @@ function showAuthView(view) {
     profile: "Complete this required profile questionnaire before entering the workspace.",
   };
   $("#authStatus").textContent = statusCopy[nextView] || statusCopy.welcome;
+}
+
+function setButtonBusy(button, busyText) {
+  if (!button) return () => {};
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = busyText;
+  return () => {
+    button.disabled = false;
+    button.textContent = originalText;
+  };
+}
+
+function startOtpCooldown(seconds = 60) {
+  const resendButton = $("#resendOtp");
+  if (!resendButton) return;
+  if (otpCooldownTimer) clearInterval(otpCooldownTimer);
+  otpCooldownUntil = Date.now() + Math.max(1, Number(seconds) || 60) * 1000;
+  const update = () => {
+    const remaining = Math.ceil((otpCooldownUntil - Date.now()) / 1000);
+    if (remaining > 0) {
+      resendButton.disabled = true;
+      resendButton.textContent = `Resend in ${remaining}s`;
+      return;
+    }
+    clearInterval(otpCooldownTimer);
+    otpCooldownTimer = null;
+    resendButton.disabled = false;
+    resendButton.textContent = "Resend OTP";
+  };
+  update();
+  otpCooldownTimer = setInterval(update, 1000);
+}
+
+function showOtpDelivery(payload, prefix = "OTP") {
+  const cooldown = Number(payload.cooldown_seconds || 60);
+  if (payload.sent === false) {
+    $("#authStatus").textContent = payload.delivery || `OTP was already sent. Please wait ${cooldown} seconds before requesting again.`;
+    $("#otpMessage").innerHTML = `${payload.delivery || "OTP was already sent."} It still expires in ${payload.expires_in_minutes || 10} minutes.`;
+    startOtpCooldown(cooldown);
+    showToast(payload.delivery || "Please wait before requesting another OTP.");
+    return false;
+  }
+  $("#otpMessage").innerHTML = payload.otp_demo
+    ? `${prefix} demo OTP: <strong>${payload.otp_demo}</strong>. It expires in ${payload.expires_in_minutes} minutes.`
+    : `${prefix} has been sent to ${payload.email}. It expires in ${payload.expires_in_minutes} minutes.`;
+  $("#authStatus").textContent = payload.delivery || `${prefix} has been sent. Please check your email.`;
+  startOtpCooldown(cooldown);
+  return true;
 }
 
 function fillSelect(select, items) {
@@ -2268,60 +2319,70 @@ document.querySelector('[data-auth-view="register"]').addEventListener("click", 
 $$('[data-auth-view="welcome"]').forEach((button) => button.addEventListener("click", () => showAuthView("welcome")));
 $("#loginForm").addEventListener("submit", async (event) => {
   event.preventDefault();
+  const restoreButton = setButtonBusy(event.submitter || event.currentTarget.querySelector('button[type="submit"]'), "Sending OTP...");
   const draft = Object.fromEntries(new FormData(event.currentTarget).entries());
   $("#authStatus").textContent = "Checking password and sending OTP...";
-  const response = await fetch("/api/request-login-otp", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(draft),
-  });
-  const payload = await response.json();
-  if (!response.ok) {
-    $("#authStatus").textContent = payload.error || "Login OTP failed.";
-    return;
+  try {
+    const response = await fetch("/api/request-login-otp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(draft),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      $("#authStatus").textContent = payload.error || "Login OTP failed.";
+      return;
+    }
+    pendingAuth = { type: "login", draft };
+    $("#otpIntro").textContent = `Enter the OTP sent to ${payload.email}.`;
+    $("#otpForm").reset();
+    showAuthView("otp");
+    showOtpDelivery(payload, "OTP");
+  } catch (error) {
+    $("#authStatus").textContent = "Network delay while sending OTP. Please wait a moment and try again.";
+  } finally {
+    restoreButton();
   }
-  pendingAuth = { type: "login", draft };
-  $("#otpIntro").textContent = `Enter the OTP sent to ${payload.email}.`;
-  $("#otpMessage").innerHTML = payload.otp_demo
-    ? `Demo OTP: <strong>${payload.otp_demo}</strong>. It expires in ${payload.expires_in_minutes} minutes.`
-    : `OTP has been sent to ${payload.email}. It expires in ${payload.expires_in_minutes} minutes.`;
-  $("#otpForm").reset();
-  showAuthView("otp");
 });
 $("#registerForm").addEventListener("submit", async (event) => {
   event.preventDefault();
+  const restoreButton = setButtonBusy(event.submitter || event.currentTarget.querySelector('button[type="submit"]'), "Sending OTP...");
 
   const draft = Object.fromEntries(new FormData(event.currentTarget).entries());
 
   $("#authStatus").textContent = "Creating verification code...";
 
-  const response = await fetch("/api/request-otp", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(draft),
-  });
+  try {
+    const response = await fetch("/api/request-otp", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(draft),
+    });
 
-  const payload = await response.json();
+    const payload = await response.json();
 
-  if (!response.ok) {
-    $("#authStatus").textContent = payload.error || "Registration OTP failed.";
-    return;
+    if (!response.ok) {
+      $("#authStatus").textContent = payload.error || "Registration OTP failed.";
+      return;
+    }
+
+    pendingAuth = {
+      type: "register",
+      draft,
+    };
+
+    $("#otpIntro").textContent = `Enter the OTP sent to ${payload.email}.`;
+    $("#otpForm").reset();
+
+    showAuthView("otp");
+    showOtpDelivery(payload, "OTP");
+  } catch (error) {
+    $("#authStatus").textContent = "Network delay while sending OTP. Please wait a moment and try again.";
+  } finally {
+    restoreButton();
   }
-
-  pendingAuth = {
-    type: "register",
-    draft,
-  };
-
-  $("#otpIntro").textContent = `Enter the OTP sent to ${payload.email}.`;
-  $("#otpMessage").innerHTML = payload.otp_demo
-    ? `Demo OTP: <strong>${payload.otp_demo}</strong>. It expires in ${payload.expires_in_minutes} minutes.`
-    : `OTP has been sent to ${payload.email}. It expires in ${payload.expires_in_minutes} minutes.`;
-  $("#otpForm").reset();
-
-  showAuthView("otp");
 });
 $("#otpForm").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -2383,20 +2444,34 @@ $("#otpForm").addEventListener("submit", async (event) => {
 });
 $("#resendOtp").addEventListener("click", async () => {
   if (!pendingAuth) return;
-  const endpoint = pendingAuth.type === "login" ? "/api/request-login-otp" : "/api/request-otp";
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(pendingAuth.draft),
-  });
-  const payload = await response.json();
-  if (!response.ok) {
-    $("#authStatus").textContent = payload.error || "Could not resend OTP.";
+  const remaining = Math.ceil((otpCooldownUntil - Date.now()) / 1000);
+  if (remaining > 0) {
+    const message = `An OTP was already sent. Please wait ${remaining} seconds before requesting another one.`;
+    $("#authStatus").textContent = message;
+    showToast(message);
     return;
   }
-  $("#otpMessage").innerHTML = payload.otp_demo
-    ? `New demo OTP: <strong>${payload.otp_demo}</strong>. It expires in ${payload.expires_in_minutes} minutes.`
-    : `A new OTP has been sent to ${payload.email}. It expires in ${payload.expires_in_minutes} minutes.`;
+  const restoreButton = setButtonBusy($("#resendOtp"), "Sending...");
+  let shouldRestoreButton = true;
+  const endpoint = pendingAuth.type === "login" ? "/api/request-login-otp" : "/api/request-otp";
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(pendingAuth.draft),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      $("#authStatus").textContent = payload.error || "Could not resend OTP.";
+      return;
+    }
+    showOtpDelivery(payload, payload.sent === false ? "OTP" : "A new OTP");
+    shouldRestoreButton = false;
+  } catch (error) {
+    $("#authStatus").textContent = "Network delay while resending OTP. Please wait a moment and try again.";
+  } finally {
+    if (shouldRestoreButton) restoreButton();
+  }
 });
 $("#firstProfileForm").addEventListener("submit", async (event) => {
   event.preventDefault();
