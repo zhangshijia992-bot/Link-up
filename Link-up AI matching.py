@@ -630,8 +630,53 @@ def login_account(data):
     return {"email": email, "profile": read_profile(email), "token": create_session(email)}, ""
 
 
-def read_users():
-    users = read_csv(CSV_PATH, HEADERS)
+def user_display_name_from_email(email):
+    local_part = (email or "").split("@")[0].strip()
+    if not local_part:
+        return "Link-Up User"
+    parts = re.split(r"[._\-]+", local_part)
+    readable = " ".join(part.capitalize() for part in parts if part)
+    return readable or local_part
+
+
+def user_stub_from_account(account):
+    email = account.get("email", "").strip().lower()
+    return {
+        **DEFAULT_PROFILE,
+        "id": email,
+        "email": email,
+        "name": user_display_name_from_email(email),
+        "verification_status": "OTP verified",
+        "reliability_score": "80",
+    }
+
+
+def merge_user_records(*record_groups):
+    merged = []
+    by_key = {}
+    for records in record_groups:
+        for record in records:
+            email = record.get("email", "").strip().lower()
+            record_id = record.get("id", "").strip()
+            key = email or record_id or record.get("name", "").strip().lower()
+            if not key:
+                continue
+            clean = {header: str(record.get(header, "") or "").strip() for header in HEADERS}
+            if email:
+                clean["email"] = email
+                clean["id"] = clean.get("id") or email
+            if key not in by_key:
+                by_key[key] = clean
+                merged.append(clean)
+                continue
+            existing = by_key[key]
+            for header, value in clean.items():
+                if value:
+                    existing[header] = value
+    return merged
+
+
+def apply_user_defaults(user, index=0):
     institutions = [
         "Asia Pacific University of Technology & Innovation (APU)",
         "Universiti Malaya (UM)",
@@ -644,18 +689,36 @@ def read_users():
         "Sunway University",
         "Multimedia University (MMU)",
     ]
-    for index, user in enumerate(users):
-        user.setdefault("institution", institutions[index % len(institutions)])
-        user.setdefault("organisation_type", "University Student")
-        user.setdefault("company", "")
-        user.setdefault("location", "Kuala Lumpur")
-        user.setdefault("study_level", "Bachelor Degree")
-        user.setdefault("major", "Computer Science")
-        user.setdefault("graduation_year", "2027")
-        user.setdefault("bio", f"{user.get('role', 'Collaborator')} interested in practical projects, team collaboration, and portfolio-building outcomes.")
-        user.setdefault("verification_status", "Profile verified")
-        user.setdefault("reliability_score", str(78 + (index % 18)))
-    return users
+    clean = {header: str(user.get(header, "") or "").strip() for header in HEADERS}
+    clean["id"] = clean.get("id") or clean.get("email") or f"user-{index + 1}"
+    clean["name"] = clean.get("name") or user_display_name_from_email(clean.get("email"))
+    clean["institution"] = clean.get("institution") or institutions[index % len(institutions)]
+    clean["organisation_type"] = clean.get("organisation_type") or "University Student"
+    clean["company"] = clean.get("company") or ""
+    clean["location"] = clean.get("location") or "Kuala Lumpur"
+    clean["study_level"] = clean.get("study_level") or "Bachelor Degree"
+    clean["major"] = clean.get("major") or "Computer Science"
+    clean["graduation_year"] = clean.get("graduation_year") or "2027"
+    clean["role"] = clean.get("role") or "Collaborator"
+    clean["bio"] = clean.get("bio") or f"{clean.get('role', 'Collaborator')} interested in practical projects, team collaboration, and portfolio-building outcomes."
+    clean["verification_status"] = clean.get("verification_status") or "Profile verified"
+    clean["reliability_score"] = clean.get("reliability_score") or str(78 + (index % 18))
+    return clean
+
+
+def read_users():
+    stored_users = read_csv(CSV_PATH, HEADERS)
+    stored_profiles = [
+        row for row in read_csv(PROFILE_PATH, HEADERS)
+        if row.get("email", "").strip()
+    ]
+    account_users = [
+        user_stub_from_account(account)
+        for account in read_accounts()
+        if account.get("email", "").strip()
+    ]
+    merged = merge_user_records(account_users, stored_users, stored_profiles)
+    return [apply_user_defaults(user, index) for index, user in enumerate(merged)]
 
 
 def write_users(users):

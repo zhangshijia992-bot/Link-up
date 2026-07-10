@@ -2295,9 +2295,28 @@ async function startRealCall(requestId, type, incomingSignal = null) {
       if (event.candidate) sendCallSignal(requestId, "ice", { candidate: event.candidate });
     };
     pc.onconnectionstatechange = () => {
-      setCallStatus(`Call status: ${pc.connectionState}`);
-      if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
-        setTimeout(() => stopActiveCall(false), 1200);
+      const state = pc.connectionState;
+      setCallStatus(`Call status: ${state}`);
+      if (state === "connected") return;
+      if (state === "disconnected") {
+        setCallStatus("Connection is unstable. Trying to reconnect...");
+        setTimeout(() => {
+          if (activeCall?.pc === pc && pc.connectionState === "disconnected") {
+            setCallStatus("Still reconnecting. Keep this chat open or end the call manually.");
+          }
+        }, 8000);
+        return;
+      }
+      if (state === "failed") {
+        setTimeout(() => {
+          if (activeCall?.pc === pc && pc.connectionState === "failed") stopActiveCall(false);
+        }, 6000);
+        return;
+      }
+      if (state === "closed") {
+        setTimeout(() => {
+          if (activeCall?.pc === pc && pc.connectionState === "closed") stopActiveCall(false);
+        }, 1200);
       }
     };
     stream.getTracks().forEach((track) => pc.addTrack(track, stream));
