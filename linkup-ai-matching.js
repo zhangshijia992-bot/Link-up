@@ -2044,6 +2044,10 @@ async function refreshChatMessages(silent = true) {
     appData = { ...appData, ...result };
     currentProfile = appData.profile || currentProfile;
     requestState = appData.requests || requestState;
+    if (activeCall && getActiveViewId() === "messages") {
+      updateNotificationBadges();
+      return;
+    }
     if (JSON.stringify(appData.chat_messages || []) !== before) {
       renderMessages(activeChatIndex);
       if (!silent) showToast("Chat updated.");
@@ -2066,11 +2070,20 @@ function startChatPolling() {
 }
 
 async function sendCallSignal(requestId, signalType, payload = {}) {
+  const callId = payload.call_id || (activeCall?.requestId === requestId ? activeCall.callId : "");
   return apiFetch("/api/calls/signals", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ request_id: requestId, signal_type: signalType, payload }),
+    body: JSON.stringify({ request_id: requestId, signal_type: signalType, payload: { ...payload, call_id: callId } }),
   });
+}
+
+function createCallId(requestId) {
+  return `call-${requestId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function signalCallId(signal) {
+  return signal?.payload?.call_id || "";
 }
 
 function acceptedRequestsForCalls() {
@@ -2119,6 +2132,7 @@ async function pollIncomingCalls() {
       const result = await response.json();
       const offer = (result.signals || []).find((signal) =>
         signal.signal_type === "offer" &&
+        signalCallId(signal) &&
         (!signal.created_at || (Date.now() / 1000 - Number(signal.created_at)) < 45) &&
         !dismissedCallSignals.has(signal.id) &&
         !pendingIncomingCalls.has(signal.id) &&
@@ -2157,7 +2171,7 @@ async function declineIncomingCall(signalId) {
   dismissedCallSignals.add(signalId);
   pendingIncomingCalls.delete(signalId);
   removeIncomingCallPrompt();
-  await sendCallSignal(pending.request.id, "end", { declined: true });
+  await sendCallSignal(pending.request.id, "end", { declined: true, call_id: signalCallId(pending.signal) });
   showToast("Call declined.");
   updateNotificationBadges();
 }
@@ -2212,6 +2226,7 @@ async function pollCallSignals() {
     const result = await response.json();
     for (const signal of result.signals || []) {
       if (!activeCall || activeCall !== call) return;
+      if (signalCallId(signal) !== call.callId) continue;
       if (!call.seen) call.seen = new Set();
       if (call.seen.has(signal.id)) continue;
       call.seen.add(signal.id);
@@ -2225,6 +2240,7 @@ async function pollCallSignals() {
 async function handleCallSignal(signal) {
   const call = activeCall;
   if (!call) return;
+  if (signalCallId(signal) && signalCallId(signal) !== call.callId) return;
   const pc = call.pc;
   const payload = signal.payload || {};
   if (signal.signal_type === "end") {
@@ -2268,12 +2284,14 @@ async function startRealCall(requestId, type, incomingSignal = null) {
   }
   renderCallStage(type, "Requesting microphone/camera permission...");
   try {
+    const callId = signalCallId(incomingSignal) || createCallId(requestId);
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: type === "video" });
     const pc = new RTCPeerConnection({
       iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
     });
     activeCall = {
       requestId,
+      callId,
       type,
       pc,
       stream,
@@ -2308,15 +2326,11 @@ async function startRealCall(requestId, type, incomingSignal = null) {
         return;
       }
       if (state === "failed") {
-        setTimeout(() => {
-          if (activeCall?.pc === pc && pc.connectionState === "failed") stopActiveCall(false);
-        }, 6000);
+        setCallStatus("Connection failed. You can retry by ending this call and starting again.");
         return;
       }
       if (state === "closed") {
-        setTimeout(() => {
-          if (activeCall?.pc === pc && pc.connectionState === "closed") stopActiveCall(false);
-        }, 1200);
+        setCallStatus("Call connection closed.");
       }
     };
     stream.getTracks().forEach((track) => pc.addTrack(track, stream));
@@ -2336,7 +2350,7 @@ async function startRealCall(requestId, type, incomingSignal = null) {
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     activeCall.makingOffer = false;
-    await sendCallSignal(requestId, "offer", { description: pc.localDescription, call_type: type });
+    await sendCallSignal(requestId, "offer", { description: pc.localDescription, call_type: type, call_id: callId });
     setCallStatus("Calling. Waiting for the other user to accept...");
   } catch (error) {
     stopActiveCall(false);

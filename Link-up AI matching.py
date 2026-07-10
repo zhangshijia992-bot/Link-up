@@ -64,6 +64,7 @@ REQUESTS_PATH = DATA_ROOT / "requests.csv"
 ACCOUNTS_PATH = DATA_ROOT / "accounts.csv"
 MESSAGES_PATH = DATA_ROOT / "messages.csv"
 COMPETITION_ENTRIES_PATH = DATA_ROOT / "competition_entries.csv"
+CALL_SIGNALS_PATH = DATA_ROOT / "call_signals.csv"
 UPLOAD_DIR = DATA_ROOT / "uploads"
 KEY_PATH = ROOT / "gemini_api_key.txt"
 AZURE_STORAGE_CONNECTION_STRING = os.environ.get("AZURE_STORAGE_CONNECTION_STRING", "").strip()
@@ -119,6 +120,7 @@ REQUEST_HEADERS = ["id", "from_email", "target_email", "target_name", "target_ro
 ACCOUNT_HEADERS = ["email", "password_hash", "salt", "created_at"]
 MESSAGE_HEADERS = ["id", "request_id", "sender_email", "sender_name", "message_type", "body", "file_name", "file_kind", "file_url", "created_at"]
 COMPETITION_ENTRY_HEADERS = ["id", "competition_title", "team_id", "team_name", "owner_email", "status", "created_at"]
+CALL_SIGNAL_HEADERS = ["id", "request_id", "sender_email", "signal_type", "payload", "created_at"]
 SESSIONS = {}
 PENDING_OTPS = {}
 CALL_SIGNALS = []
@@ -946,11 +948,51 @@ def save_chat_message(data):
     return message, messages_for_visible_requests(profile)
 
 
+def read_call_signals():
+    rows = read_csv(CALL_SIGNALS_PATH, CALL_SIGNAL_HEADERS)
+    signals = []
+    for row in rows:
+        payload = row.get("payload", {})
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload) if payload else {}
+            except json.JSONDecodeError:
+                payload = {}
+        try:
+            created_at = float(row.get("created_at") or 0)
+        except (TypeError, ValueError):
+            created_at = 0
+        signals.append({
+            "id": row.get("id", ""),
+            "request_id": row.get("request_id", ""),
+            "sender_email": row.get("sender_email", ""),
+            "signal_type": row.get("signal_type", ""),
+            "payload": payload,
+            "created_at": created_at,
+        })
+    return signals
+
+
+def write_call_signals(signals):
+    rows = []
+    for signal in signals:
+        rows.append({
+            "id": signal.get("id", ""),
+            "request_id": signal.get("request_id", ""),
+            "sender_email": signal.get("sender_email", ""),
+            "signal_type": signal.get("signal_type", ""),
+            "payload": json.dumps(signal.get("payload", {})),
+            "created_at": str(signal.get("created_at", time.time())),
+        })
+    write_csv(CALL_SIGNALS_PATH, CALL_SIGNAL_HEADERS, rows)
+
+
 def save_call_signal(data):
     profile = read_profile(data.get("sender_email", ""))
     request_id = data.get("request_id", "")
     if not accepted_request_for_actor(profile, request_id):
         return None, "Calls are locked until the collaboration request is accepted."
+    call_signals = read_call_signals()
     signal = {
         "id": data.get("id") or f"sig{int(time.time() * 1000)}{secrets.randbelow(9999)}",
         "request_id": request_id,
@@ -959,9 +1001,10 @@ def save_call_signal(data):
         "payload": data.get("payload", {}),
         "created_at": time.time(),
     }
-    CALL_SIGNALS.append(signal)
     cutoff = time.time() - 1800
-    CALL_SIGNALS[:] = [item for item in CALL_SIGNALS if item.get("created_at", 0) >= cutoff]
+    call_signals = [item for item in call_signals if float(item.get("created_at") or 0) >= cutoff]
+    call_signals.append(signal)
+    write_call_signals(call_signals)
     return signal, ""
 
 
@@ -970,7 +1013,7 @@ def visible_call_signals(profile, request_id):
         return []
     return [
         signal
-        for signal in CALL_SIGNALS
+        for signal in read_call_signals()
         if signal.get("request_id") == request_id
         and signal.get("sender_email", "").lower() != profile.get("email", "").lower()
     ]
@@ -1617,6 +1660,7 @@ class Handler(SimpleHTTPRequestHandler):
                 "teams_count": len(read_csv(TEAMS_PATH, TEAM_HEADERS)),
                 "requests_count": len(read_csv(REQUESTS_PATH, REQUEST_HEADERS)),
                 "messages_count": len(read_csv(MESSAGES_PATH, MESSAGE_HEADERS)),
+                "call_signals_count": len(read_call_signals()),
             })
         return super().do_GET()
 
