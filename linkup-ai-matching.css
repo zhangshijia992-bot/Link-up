@@ -114,6 +114,23 @@ button { cursor: pointer; }
   overflow: hidden;
 }
 
+#loginForm.active::before {
+  content: "";
+  position: absolute;
+  top: 24px;
+  left: 28px;
+  width: 52px;
+  height: 52px;
+  background:
+    radial-gradient(ellipse at 30% 64%, rgba(45, 212, 191, 0.92) 0 18%, transparent 19%),
+    radial-gradient(ellipse at 54% 44%, rgba(22, 163, 74, 0.82) 0 18%, transparent 19%),
+    radial-gradient(ellipse at 72% 66%, rgba(15, 118, 110, 0.72) 0 16%, transparent 17%),
+    linear-gradient(180deg, transparent 0 54%, rgba(15, 118, 110, 0.55) 55% 68%, transparent 69%);
+  opacity: 0.92;
+  filter: drop-shadow(0 14px 20px rgba(15, 118, 110, 0.16));
+  pointer-events: none;
+}
+
 #loginForm.active::after {
   content: "";
   position: absolute;
