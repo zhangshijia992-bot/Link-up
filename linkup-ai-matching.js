@@ -9,6 +9,9 @@ let requestFilter = "all";
 let activeChatIndex = null;
 let chatPoller = null;
 let activeCall = null;
+let callInvitePoller = null;
+const dismissedCallSignals = new Set();
+const pendingIncomingCalls = new Map();
 let activeCompetitionIndex = 0;
 let introIndex = 0;
 let introPlaying = false;
@@ -1029,6 +1032,66 @@ function switchView(id) {
   $$(".view").forEach((view) => view.classList.toggle("active", view.id === id));
 }
 
+function setNavBadge(view, count) {
+  const nav = document.querySelector(`.nav-item[data-view="${view}"]`);
+  if (!nav) return;
+  const value = Number(count || 0);
+  nav.classList.toggle("has-badge", value > 0);
+  if (value > 0) nav.setAttribute("data-badge", value > 9 ? "9+" : String(value));
+  else nav.removeAttribute("data-badge");
+}
+
+function messageSeenKey() {
+  return `linkup_seen_messages_${(currentProfile.email || "guest").toLowerCase()}`;
+}
+
+function messageIdentity(message) {
+  return message.id || [
+    message.request_id || "",
+    message.sender_email || "",
+    message.created_at || "",
+    message.body || "",
+    message.file_name || "",
+  ].join("|");
+}
+
+function getSeenMessageIds() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(messageSeenKey()) || "[]"));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveSeenMessageIds(ids) {
+  localStorage.setItem(messageSeenKey(), JSON.stringify([...ids].slice(-1000)));
+}
+
+function markChatMessagesSeen(requestId) {
+  if (!requestId) return;
+  const seen = getSeenMessageIds();
+  (appData.chat_messages || [])
+    .filter((message) => message.request_id === requestId)
+    .forEach((message) => seen.add(messageIdentity(message)));
+  saveSeenMessageIds(seen);
+}
+
+function countUnreadMessages() {
+  const seen = getSeenMessageIds();
+  const me = (currentProfile.email || "").toLowerCase();
+  return (appData.chat_messages || []).filter((message) => {
+    const sender = (message.sender_email || "").toLowerCase();
+    return sender && sender !== me && sender !== "system" && !seen.has(messageIdentity(message));
+  }).length;
+}
+
+function updateNotificationBadges() {
+  const incomingPending = (requestState || []).filter((request) =>
+    isIncomingRequest(request) && (request.status || "In Progress") === "In Progress"
+  ).length;
+  setNavBadge("messages", incomingPending + countUnreadMessages() + pendingIncomingCalls.size);
+}
+
 function getMatchPayload() {
   if (!appliedIntent) return null;
   const selectedTeam = (appData.my_teams || []).find((team) => team.id === selectedTeamId);
@@ -1857,7 +1920,9 @@ function renderMessages(active = null) {
     </article>
   `).join("");
   const chat = detailMode ? conversations[active] : null;
+  if (chat?.requestId) markChatMessagesSeen(chat.requestId);
   $("#chatRoom").innerHTML = detailMode ? renderChatRoom(chat) : "";
+  updateNotificationBadges();
 }
 
 function lifecycleStepsFor(request) {
@@ -1972,15 +2037,21 @@ async function sendChatMessage(form) {
 async function refreshChatMessages(silent = true) {
   if (!authToken) return;
   try {
-    const response = await apiFetch("/api/messages");
+    const response = await apiFetch("/api/data");
     if (!response.ok) return;
     const result = await response.json();
     const before = JSON.stringify(appData.chat_messages || []);
-    appData.chat_messages = result.messages || [];
+    appData = { ...appData, ...result };
+    currentProfile = appData.profile || currentProfile;
+    requestState = appData.requests || requestState;
     if (JSON.stringify(appData.chat_messages || []) !== before) {
       renderMessages(activeChatIndex);
       if (!silent) showToast("Chat updated.");
+    } else if (getActiveViewId() === "messages") {
+      renderMessages(activeChatIndex);
     }
+    renderLifecycle();
+    updateNotificationBadges();
   } catch (error) {
     console.warn("Chat polling failed", error);
   }
@@ -1988,15 +2059,107 @@ async function refreshChatMessages(silent = true) {
 
 function startChatPolling() {
   if (chatPoller) clearInterval(chatPoller);
+  if (callInvitePoller) clearInterval(callInvitePoller);
   chatPoller = setInterval(() => refreshChatMessages(true), 5000);
+  callInvitePoller = setInterval(() => pollIncomingCalls(), 2500);
+  pollIncomingCalls();
 }
 
 async function sendCallSignal(requestId, signalType, payload = {}) {
-  await apiFetch("/api/calls/signals", {
+  return apiFetch("/api/calls/signals", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ request_id: requestId, signal_type: signalType, payload }),
   });
+}
+
+function acceptedRequestsForCalls() {
+  return (requestState || []).filter((request) => (request.status || "").toLowerCase() === "accepted");
+}
+
+function callPartnerLabel(request) {
+  return requestPartnerLabel(request) || "collaborator";
+}
+
+function removeIncomingCallPrompt() {
+  document.querySelector(".incoming-call-overlay")?.remove();
+}
+
+function showIncomingCallPrompt(signal, request) {
+  if (!signal?.id || dismissedCallSignals.has(signal.id) || pendingIncomingCalls.has(signal.id)) return;
+  const type = signal.payload?.call_type || "video";
+  pendingIncomingCalls.set(signal.id, { signal, request, type });
+  updateNotificationBadges();
+  removeIncomingCallPrompt();
+  document.body.insertAdjacentHTML("beforeend", `
+    <div class="incoming-call-overlay" role="dialog" aria-live="assertive" aria-label="Incoming call">
+      <div class="incoming-call-card">
+        <div class="incoming-call-avatar">${type === "video" ? "VC" : "AC"}</div>
+        <div>
+          <span class="eyebrow">Incoming ${type === "video" ? "video" : "voice"} call</span>
+          <h3>${escapeHtml(callPartnerLabel(request))}</h3>
+          <p class="muted">${escapeHtml(request.project || request.team_name || "Collaboration chat")}</p>
+        </div>
+        <div class="incoming-call-actions">
+          <button class="secondary danger" type="button" data-call-decline="${escapeAttr(signal.id)}">Decline</button>
+          <button class="primary" type="button" data-call-accept="${escapeAttr(signal.id)}">Accept</button>
+        </div>
+      </div>
+    </div>
+  `);
+  showToast(`Incoming ${type === "video" ? "video" : "voice"} call from ${callPartnerLabel(request)}.`);
+}
+
+async function pollIncomingCalls() {
+  if (!authToken || activeCall || document.querySelector(".incoming-call-overlay")) return;
+  for (const request of acceptedRequestsForCalls()) {
+    try {
+      const response = await apiFetch(`/api/calls/signals?request_id=${encodeURIComponent(request.id)}`);
+      if (!response.ok) continue;
+      const result = await response.json();
+      const offer = (result.signals || []).find((signal) =>
+        signal.signal_type === "offer" &&
+        (!signal.created_at || (Date.now() / 1000 - Number(signal.created_at)) < 45) &&
+        !dismissedCallSignals.has(signal.id) &&
+        !pendingIncomingCalls.has(signal.id) &&
+        (signal.sender_email || "").toLowerCase() !== (currentProfile.email || "").toLowerCase()
+      );
+      if (offer) {
+        showIncomingCallPrompt(offer, request);
+        return;
+      }
+    } catch (error) {
+      console.warn("Incoming call polling failed", error);
+    }
+  }
+}
+
+function openChatByRequestId(requestId) {
+  const index = (requestState || []).map(requestToConversation).findIndex((chat) => chat.requestId === requestId);
+  switchView("messages");
+  renderMessages(index >= 0 ? index : null);
+}
+
+async function acceptIncomingCall(signalId) {
+  const pending = pendingIncomingCalls.get(signalId);
+  if (!pending) return;
+  dismissedCallSignals.add(signalId);
+  pendingIncomingCalls.delete(signalId);
+  removeIncomingCallPrompt();
+  openChatByRequestId(pending.request.id);
+  await startRealCall(pending.request.id, pending.type, pending.signal);
+  updateNotificationBadges();
+}
+
+async function declineIncomingCall(signalId) {
+  const pending = pendingIncomingCalls.get(signalId);
+  if (!pending) return;
+  dismissedCallSignals.add(signalId);
+  pendingIncomingCalls.delete(signalId);
+  removeIncomingCallPrompt();
+  await sendCallSignal(pending.request.id, "end", { declined: true });
+  showToast("Call declined.");
+  updateNotificationBadges();
 }
 
 function renderCallStage(type, status = "Connecting...") {
@@ -2027,10 +2190,11 @@ function setCallStatus(status) {
 
 function stopActiveCall(sendEnd = true) {
   if (!activeCall) return;
-  if (sendEnd) sendCallSignal(activeCall.requestId, "end", {});
-  if (activeCall.poller) clearInterval(activeCall.poller);
-  activeCall.stream?.getTracks?.().forEach((track) => track.stop());
-  activeCall.pc?.close?.();
+  const call = activeCall;
+  if (sendEnd) sendCallSignal(call.requestId, "end", {});
+  if (call.poller) clearInterval(call.poller);
+  call.stream?.getTracks?.().forEach((track) => track.stop());
+  call.pc?.close?.();
   activeCall = null;
   const stage = $("#callStage");
   if (stage) {
@@ -2040,23 +2204,31 @@ function stopActiveCall(sendEnd = true) {
 }
 
 async function pollCallSignals() {
-  if (!activeCall) return;
-  const response = await apiFetch(`/api/calls/signals?request_id=${encodeURIComponent(activeCall.requestId)}`);
-  if (!response.ok) return;
-  const result = await response.json();
-  for (const signal of result.signals || []) {
-    if (activeCall.seen.has(signal.id)) continue;
-    activeCall.seen.add(signal.id);
-    await handleCallSignal(signal);
+  const call = activeCall;
+  if (!call) return;
+  try {
+    const response = await apiFetch(`/api/calls/signals?request_id=${encodeURIComponent(call.requestId)}`);
+    if (!response.ok || activeCall !== call) return;
+    const result = await response.json();
+    for (const signal of result.signals || []) {
+      if (!activeCall || activeCall !== call) return;
+      if (!call.seen) call.seen = new Set();
+      if (call.seen.has(signal.id)) continue;
+      call.seen.add(signal.id);
+      await handleCallSignal(signal);
+    }
+  } catch (error) {
+    if (activeCall === call) console.warn("Call signal polling failed", error);
   }
 }
 
 async function handleCallSignal(signal) {
-  if (!activeCall) return;
-  const pc = activeCall.pc;
+  const call = activeCall;
+  if (!call) return;
+  const pc = call.pc;
   const payload = signal.payload || {};
   if (signal.signal_type === "end") {
-    setCallStatus("The other user ended the call.");
+    setCallStatus(signal.payload?.declined ? "The other user declined the call." : "The other user ended the call.");
     stopActiveCall(false);
     return;
   }
@@ -2069,14 +2241,16 @@ async function handleCallSignal(signal) {
     return;
   }
   if (signal.signal_type === "offer" && payload.description) {
-    const offerCollision = activeCall.makingOffer || pc.signalingState !== "stable";
+    const offerCollision = call.makingOffer || pc.signalingState !== "stable";
     const polite = (currentProfile.email || "") > (signal.sender_email || "");
     if (offerCollision && !polite) return;
     if (offerCollision) await pc.setLocalDescription({ type: "rollback" });
+    if (activeCall !== call) return;
     await pc.setRemoteDescription(payload.description);
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    await sendCallSignal(activeCall.requestId, "answer", { description: pc.localDescription });
+    if (activeCall !== call) return;
+    await sendCallSignal(call.requestId, "answer", { description: pc.localDescription });
     setCallStatus("Connected. Waiting for media stream...");
     return;
   }
@@ -2086,7 +2260,7 @@ async function handleCallSignal(signal) {
   }
 }
 
-async function startRealCall(requestId, type) {
+async function startRealCall(requestId, type, incomingSignal = null) {
   stopActiveCall(false);
   if (!navigator.mediaDevices?.getUserMedia || !window.RTCPeerConnection) {
     showToast("This browser does not support real-time calls.");
@@ -2127,7 +2301,13 @@ async function startRealCall(requestId, type) {
       }
     };
     stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+    if (incomingSignal?.id) activeCall.seen.add(incomingSignal.id);
     activeCall.poller = setInterval(pollCallSignals, 1200);
+    if (incomingSignal) {
+      setCallStatus("Accepting incoming call...");
+      await handleCallSignal(incomingSignal);
+      return;
+    }
     await pollCallSignals();
     if (pc.signalingState !== "stable") {
       setCallStatus("Answering incoming call...");
@@ -2138,7 +2318,7 @@ async function startRealCall(requestId, type) {
     await pc.setLocalDescription(offer);
     activeCall.makingOffer = false;
     await sendCallSignal(requestId, "offer", { description: pc.localDescription, call_type: type });
-    setCallStatus("Calling. Ask the other user to open this chat and press the same call button.");
+    setCallStatus("Calling. Waiting for the other user to accept...");
   } catch (error) {
     stopActiveCall(false);
     showToast(`Call could not start: ${error.message || error}`);
@@ -2246,6 +2426,18 @@ document.addEventListener("click", (event) => {
   const requestActionButton = event.target.closest("[data-request-action]");
   if (requestActionButton) {
     updateRequestStatus(requestActionButton.dataset.requestId, requestActionButton.dataset.requestAction);
+  }
+
+  const acceptCallButton = event.target.closest("[data-call-accept]");
+  if (acceptCallButton) {
+    acceptIncomingCall(acceptCallButton.dataset.callAccept);
+    return;
+  }
+
+  const declineCallButton = event.target.closest("[data-call-decline]");
+  if (declineCallButton) {
+    declineIncomingCall(declineCallButton.dataset.callDecline);
+    return;
   }
 
   if (event.target.closest("#clearManualFilters")) {
